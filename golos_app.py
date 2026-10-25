@@ -181,6 +181,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     if broken:
         log.warning("Повреждённый конфиг сохранён как %s", broken)
+    else:
+        # Пишем конфиг сразу: старые файлы приходят без новых полей
+        # (streaming, hold_back_seconds…), и в диагностике было видно None.
+        try:
+            from golos.config import save_config
+
+            save_config(config, config_path)
+        except OSError as exc:
+            log.warning("Не удалось записать настройки: %s", exc)
 
     single = SingleInstance()
     if not single.acquire():

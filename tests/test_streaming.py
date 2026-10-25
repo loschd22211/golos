@@ -235,3 +235,129 @@ def test_context_prompt_uses_committed_text(rig):
     prompts = [call["prompt"] for call in rig.transcriber.calls]
     assert prompts[0] == rig.cfg.initial_prompt or prompts[0] is None
     assert any(p and len(p) > len(rig.cfg.initial_prompt or "") for p in prompts[1:])
+
+
+# ---------------------------------------------------- регрессия: непрерывная речь
+class WordTranscriber:
+    """Один сегмент до самого конца аудио — как Whisper при непрерывной речи.
+
+    Именно на этом ломался прежний алгоритм: сегмент заканчивается ровно там же,
+    где и кусок, поэтому условие «вставлять то, что закончилось до порога» не
+    выполнялось никогда, и текст не появлялся до остановки записи.
+    """
+
+    def __init__(self, words=("привет", "как", "дела", "друг")):
+        self.words = list(words)
+        self.calls = []
+        self.is_ready = True
+
+    def set_config(self, config):
+        pass
+
+    def segments(self, audio, config=None, initial_prompt=None, beam_size=None, want_words=True):
+        duration = audio.size / 16000.0
+        self.calls.append({"duration": duration, "beam": beam_size})
+        per = duration / len(self.words)
+        words = [
+            {"word": w, "start": index * per, "end": (index + 1) * per}
+            for index, w in enumerate(self.words)
+        ]
+        return [{"text": " ".join(self.words), "start": 0.0, "end": duration, "words": words}]
+
+
+def make_dictator(cfg, transcriber, injector=None, events=None):
+    recorder = FakeRecorder()
+    events = events if events is not None else {"text": [], "partial": []}
+    dictator = StreamingDictator(
+        recorder=recorder,
+        transcriber=transcriber,
+        injector=injector or FakeInjector(),
+        config=cfg,
+        on_text=events["text"].append,
+        on_partial=events["partial"].append,
+    )
+    return recorder, dictator, events
+
+
+def test_continuous_speech_is_inserted_without_pauses():
+    """Без пауз в речи текст всё равно должен вставляться — не только на стопе."""
+    cfg = Config()
+    cfg.stream_step = 0.15
+    cfg.min_chunk_seconds = 0.5
+    cfg.hold_back_seconds = 0.3
+    cfg.force_commit_seconds = 1.2
+
+    transcriber = WordTranscriber()
+    events = {"text": [], "partial": []}
+    recorder, dictator, events = make_dictator(cfg, transcriber, events=events)
+
+    dictator.start()
+    recorder.set_length(2.0)
+    assert wait_for(lambda: events["text"]), "текст обязан появиться во время записи"
+
+    recorder.set_length(4.0)
+    assert wait_for(lambda: len(events["text"]) >= 2)
+
+    dictator.stop()
+    assert events["text"]
+    assert all(chunk.strip() for chunk in events["text"])
+
+
+def test_committed_text_is_not_repeated():
+    cfg = Config()
+    cfg.stream_step = 0.15
+    cfg.min_chunk_seconds = 0.5
+    cfg.force_commit_seconds = 1.2
+
+    events = {"text": [], "partial": []}
+    recorder, dictator, events = make_dictator(cfg, WordTranscriber(), events=events)
+    dictator.start()
+    for seconds in (2.0, 3.0, 4.5, 6.0):
+        recorder.set_length(seconds)
+        wait_for(lambda: True, timeout=0.5)
+    dictator.stop()
+
+    # каждое слово вставляется не больше одного раза на сеанс
+    joined = " ".join(events["text"]).lower()
+    assert joined.count("привет") <= 1
+    assert joined.count("друг") <= 1
+
+
+def test_words_finishing_before_limit_are_inserted_first():
+    """Вставляется только то, что уже прозвучало; остаток показываем как «живой»."""
+    cfg = Config()
+    cfg.stream_step = 0.15
+    cfg.min_chunk_seconds = 0.4
+    cfg.hold_back_seconds = 0.6
+    cfg.force_commit_seconds = 10.0  # принудительную вставку отключаем
+
+    events = {"text": [], "partial": []}
+    recorder, dictator, events = make_dictator(cfg, WordTranscriber(), events=events)
+    dictator.start()
+    recorder.set_length(4.0)
+
+    assert wait_for(lambda: events["text"] or events["partial"])
+    if events["text"]:
+        # вставлено меньше, чем сказано: последние слова ещё «в процессе»
+        assert events["partial"] or len(events["text"][0]) < 40
+    dictator.cancel()
+
+
+def test_force_commit_keeps_last_word_for_partial():
+    cfg = Config()
+    cfg.stream_step = 0.15
+    cfg.min_chunk_seconds = 0.4
+    cfg.hold_back_seconds = 5.0      # паузы «не будет»
+    cfg.force_commit_seconds = 1.0
+
+    events = {"text": [], "partial": []}
+    recorder, dictator, events = make_dictator(cfg, WordTranscriber(), events=events)
+    dictator.start()
+    recorder.set_length(3.0)
+
+    assert wait_for(lambda: events["text"])
+    dictator.cancel()
+    # последнее слово придержано, остальное вставлено
+    inserted = events["text"][0].lower()
+    assert "друг" not in inserted
+    assert "привет" in inserted

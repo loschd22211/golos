@@ -1,0 +1,440 @@
+"""Диагностика «Голоса» прямо в терминале.
+
+Запуск (PowerShell):
+
+    cd C:\\Users\\user\\Downloads\\golos
+    .\\doctor.bat
+
+или напрямую:
+
+    .venv\\Scripts\\python.exe -m golos.diagnose
+    .venv\\Scripts\\python.exe -m golos.diagnose --record 6
+    .venv\\Scripts\\python.exe -m golos.diagnose --fix
+
+Скрипт ничего не меняет без флага ``--fix``. Он проверяет по шагам: окружение,
+конфиг, пакеты, микрофоны, запись и уровень, загрузку модели, распознавание,
+поведение потоковой вставки, буфер обмена — и печатает ``ОК``/``ПРОБЛЕМА``
+по каждому пункту, чтобы было видно, где именно ломается.
+"""
+
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import os
+import sys
+import time
+import traceback
+from pathlib import Path
+
+OK = "[ OK ]"
+BAD = "[БЕДА]"
+WARN = "[ ?? ]"
+
+failures: list[str] = []
+warnings: list[str] = []
+
+
+def _utf8_stdout() -> None:
+    """Windows-консоль по умолчанию cp866 и падает на русских названиях устройств."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+    if sys.stdout is not None and not isinstance(sys.stdout, io.TextIOWrapper):
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+def say(status: str, text: str, detail: str = "") -> None:
+    line = f"{status} {text}"
+    if detail:
+        line += f" — {detail}"
+    print(line, flush=True)
+    if status == BAD:
+        failures.append(text + (f": {detail}" if detail else ""))
+    elif status == WARN:
+        warnings.append(text + (f": {detail}" if detail else ""))
+
+
+def section(title: str) -> None:
+    print(f"\n=== {title} " + "=" * max(0, 46 - len(title)), flush=True)
+
+
+# --------------------------------------------------------------------- checks
+def check_environment(root: Path) -> None:
+    section("Окружение")
+    print(f"     python: {sys.version.split()[0]} ({sys.executable})")
+    print(f"     проект: {root}")
+
+    missing = [
+        name
+        for name in ("overlay.py", "streaming.py", "winfocus.py", "app.py")
+        if not (root / "golos" / name).exists()
+    ]
+    if missing:
+        say(BAD, "в проекте нет файлов", ", ".join(missing))
+    else:
+        say(OK, "файлы программы на месте")
+
+    if sys.version_info < (3, 9):
+        say(BAD, "слишком старый Python", "нужен 3.9 или новее")
+    else:
+        say(OK, "версия Python подходит")
+
+
+def check_packages() -> None:
+    section("Пакеты")
+    required = ("faster_whisper", "sounddevice", "numpy", "keyboard", "pyperclip")
+    optional = ("pystray", "PIL")
+    for name in required:
+        try:
+            module = __import__(name)
+            version = getattr(module, "__version__", "")
+            say(OK, name, version)
+        except Exception as exc:
+            say(BAD, f"нет пакета {name}", str(exc))
+    for name in optional:
+        try:
+            __import__(name)
+            say(OK, name, "необязательный")
+        except Exception as exc:
+            say(WARN, f"нет пакета {name}", str(exc))
+
+
+def check_config(appdata: Path) -> tuple:
+    section("Настройки")
+    path = appdata / "config.json"
+    raw = {}
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            say(OK, "config.json прочитан", str(path))
+        except Exception as exc:
+            say(BAD, "config.json повреждён", str(exc))
+    else:
+        say(WARN, "config.json ещё не создан", "будут значения по умолчанию")
+
+    for key in ("model", "streaming", "stream_step", "hold_back_seconds",
+                "force_commit_seconds", "language"):
+        print(f"     {key}: {raw.get(key, '— (по умолчанию)')}")
+
+    if raw.get("model") in ("medium", "large-v3") and "streaming" not in raw:
+        say(WARN, "старый конфиг с тяжёлой моделью",
+            "миграция переведёт на small; можно ускорить через --fix")
+
+    try:
+        from golos.config import Config, load_config
+
+        config, broken = load_config(path)
+        print(f"     итог: модель={config.model}, streaming={config.streaming}, "
+              f"язык={config.language}, beam={config.beam_size}")
+        return config, raw
+    except Exception:
+        traceback.print_exc()
+        say(BAD, "не удалось загрузить настройки")
+        return Config(), raw
+
+
+def check_devices() -> None:
+    section("Микрофоны")
+    try:
+        import sounddevice as sd
+    except Exception as exc:
+        say(BAD, "sounddevice не работает", str(exc))
+        return
+
+    try:
+        devices = sd.query_devices()
+    except Exception as exc:
+        say(BAD, "не удалось получить список устройств", str(exc))
+        return
+
+    inputs = [(i, d) for i, d in enumerate(devices) if d.get("max_input_channels", 0) > 0]
+    if not inputs:
+        say(BAD, "нет ни одного микрофона", "проверьте подключение и разрешения Windows")
+        return
+    for index, device in inputs:
+        print(f"     {index}: {device['name']}")
+    try:
+        default_in = sd.default.device[0]
+        print(f"     по умолчанию: {default_in}")
+    except Exception:
+        pass
+    say(OK, "микрофоны найдены", f"{len(inputs)} устройств(а)")
+
+
+def check_hotkeys(config) -> None:
+    section("Горячие клавиши")
+    try:
+        import keyboard
+    except Exception as exc:
+        say(BAD, "keyboard не установлен", str(exc))
+        return
+    try:
+        handle = keyboard.add_hotkey(config.hotkey, lambda: None)
+        keyboard.remove_hotkey(handle)
+        say(OK, f"сочетание {config.hotkey} свободно")
+    except Exception as exc:
+        say(BAD, f"не удалось назначить {config.hotkey}",
+            f"{exc} (возможно, занято другой программой)")
+
+
+def check_clipboard() -> None:
+    section("Буфер обмена")
+    try:
+        import pyperclip
+
+        pyperclip.copy("голос-тест")
+        back = pyperclip.paste()
+        if back == "голос-тест":
+            say(OK, "чтение и запись работают")
+        else:
+            say(BAD, "буфер вернул другое содержимое", repr(back))
+    except Exception as exc:
+        say(BAD, "буфер обмена недоступен", str(exc))
+
+
+def check_recording(config, seconds: float):
+    section(f"Запись {seconds:g} секунд — ГОВОРИТЕ СЕЙЧАС")
+    try:
+        from golos.audio import MicrophoneRecorder
+    except Exception:
+        traceback.print_exc()
+        say(BAD, "модуль записи не загрузился")
+        return None
+
+    recorder = MicrophoneRecorder(config)
+    try:
+        recorder.start()
+    except Exception as exc:
+        say(BAD, "микрофон не открылся", str(exc))
+        return None
+
+    print("     ...", end="", flush=True)
+    peak = 0.0
+    started = time.time()
+    while time.time() - started < seconds:
+        time.sleep(0.1)
+        peak = max(peak, recorder.peak)
+        print(".", end="", flush=True)
+    print()
+    recording = recorder.stop()
+
+    if recording is None:
+        say(BAD, "микрофон не отдал звук", "проверьте разрешения Windows")
+        return None
+
+    print(f"     длительность: {recording.duration:.2f} c, пик: {recording.peak:.3f}")
+    if recording.peak < 0.01:
+        say(BAD, "микрофон молчит (тишина)",
+            "Параметры → Конфиденциальность → Микрофон → разрешить приложениям")
+    else:
+        say(OK, "звук с микрофона есть")
+    return recording
+
+
+def check_model(config, appdata: Path, recording) -> None:
+    section("Модель и распознавание")
+    try:
+        from golos.transcribe import WhisperTranscriber
+
+        transcriber = WhisperTranscriber(config, appdata / "models")
+        started = time.time()
+        transcriber.preload()
+        load_time = time.time() - started
+        say(OK, f"модель {config.model} загружена", f"{load_time:.1f} c")
+
+        if recording is None:
+            say(WARN, "распознавание не проверено", "не было записи")
+            return
+
+        started = time.time()
+        result = transcriber.transcribe(recording.samples, config)
+        elapsed = time.time() - started
+        print(f"     распознавание: {elapsed:.1f} c, язык: {result.language or '—'}")
+        print(f"     текст: {result.text!r}")
+        if result.text.strip():
+            ratio = elapsed / max(0.1, recording.duration)
+            say(OK, "речь распознаётся", f"{ratio:.2f}× от длительности")
+        else:
+            say(BAD, "модель вернула пустой текст",
+                "проверьте микрофон и язык в настройках")
+    except Exception as exc:
+        say(BAD, "распознавание не работает", str(exc))
+        traceback.print_exc()
+
+
+def check_streaming_logic(config, appdata: Path, recording) -> None:
+    """Проверить, что потоковый режим вообще способен что-то вставить."""
+    section("Потоковая вставка (главная проверка)")
+    if recording is None:
+        say(WARN, "не проверено", "не было записи")
+        return
+
+    try:
+        from golos.transcribe import WhisperTranscriber
+
+        transcriber = WhisperTranscriber(config, appdata / "models")
+        piece = recording.samples[: int(min(4.0, recording.duration) * config.sample_rate)]
+        duration = piece.size / config.sample_rate
+        segments = transcriber.segments(piece, config)
+
+        limit = duration - config.hold_back_seconds
+        print(f"     кусок {duration:.1f} c, порог «точно сказано» {limit:.1f} c")
+        words = 0
+        ready = 0
+        for segment in segments:
+            seg_words = segment.get("words") or []
+            words += len(seg_words)
+            for word in seg_words:
+                mark = "вставится" if word["end"] <= limit else "придержим"
+                print(f"       {word['start']:.2f}-{word['end']:.2f} "
+                      f"{word['word']!r} → {mark}")
+                if word["end"] <= limit:
+                    ready += 1
+            if not seg_words:
+                print(f"       сегмент {segment['start']:.2f}-{segment['end']:.2f}: "
+                      f"{segment['text']!r} (без таймингов слов)")
+
+        if not segments:
+            say(BAD, "модель не вернула сегментов на куске речи")
+        elif ready:
+            say(OK, "текст будет вставляться по ходу речи", f"готово слов: {ready}")
+        else:
+            forced = duration >= config.force_commit_seconds
+            say(WARN if not forced else OK,
+                "слов до порога нет",
+                "сработает принудительная вставка" if forced else "проверьте hold_back_seconds")
+    except Exception as exc:
+        say(BAD, "потоковая проверка не удалась", str(exc))
+        traceback.print_exc()
+
+
+def check_log(appdata: Path) -> None:
+    section("Журнал")
+    path = appdata / "golos.log"
+    if not path.exists():
+        say(WARN, "журнала пока нет", str(path))
+        return
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as exc:
+        say(BAD, "журнал не читается", str(exc))
+        return
+
+    interesting = [
+        line for line in lines
+        if any(key in line for key in ("ERROR", "Traceback", "Поток", "вставляю", "Запись"))
+    ]
+    for line in interesting[-15:]:
+        print("     " + line)
+    errors = [line for line in lines[-200:] if " ERROR " in line]
+    if errors:
+        say(WARN, "в журнале есть ошибки", f"{len(errors)} за последнее время")
+    else:
+        say(OK, "ошибок в журнале нет", str(path))
+
+
+def fix_config(appdata: Path) -> None:
+    section("Исправление настроек (--fix)")
+    path = appdata / "config.json"
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        backup = path.with_suffix(".json.bak")
+        try:
+            backup.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"     копия: {backup}")
+        except Exception:
+            pass
+
+    data.update(
+        {
+            "model": "small",
+            "streaming": True,
+            "stream_step": 0.35,
+            "min_chunk_seconds": 0.8,
+            "hold_back_seconds": 0.3,
+            "force_commit_seconds": 2.5,
+            "beam_size": 3,
+        }
+    )
+    if data.get("language") not in ("auto", "ru", "en"):
+        data["language"] = "auto"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        say(OK, "настройки обновлены", str(path))
+        print("     модель small, потоковая вставка включена, beam 3")
+    except Exception as exc:
+        say(BAD, "не удалось записать настройки", str(exc))
+
+
+# ----------------------------------------------------------------------- main
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="golos.diagnose", description="Диагностика «Голоса»")
+    parser.add_argument("--root", default="", help="папка проекта (по умолчанию текущая)")
+    parser.add_argument("--record", type=float, default=5.0, help="сколько секунд писать микрофон")
+    parser.add_argument("--fix", action="store_true", help="записать рабочие настройки в config.json")
+    parser.add_argument("--no-record", action="store_true", help="не записывать микрофон")
+    args = parser.parse_args(argv)
+
+    _utf8_stdout()
+    root = Path(args.root).resolve() if args.root else Path.cwd()
+    appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Golos"
+
+    print("Диагностика «Голоса»")
+    print(f"Дата: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    check_environment(root)
+    config, raw = check_config(appdata)
+    if args.fix:
+        fix_config(appdata)
+        config, raw = check_config(appdata)
+    check_packages()
+    check_devices()
+    check_hotkeys(config)
+    check_clipboard()
+
+    recording = None
+    if not args.no_record:
+        recording = check_recording(config, max(2.0, args.record))
+    check_model(config, appdata, recording)
+    check_streaming_logic(config, appdata, recording)
+    check_log(appdata)
+
+    section("Итог")
+    if failures:
+        print(f"{BAD} проблем: {len(failures)}")
+        for item in failures:
+            print(f"     - {item}")
+    else:
+        print(f"{OK} критичных проблем не найдено")
+    if warnings:
+        print(f"{WARN} замечаний: {len(warnings)}")
+        for item in warnings:
+            print(f"     - {item}")
+
+    print(
+        "\nЧто делать дальше:\n"
+        "  1. Если есть проблемы — исправьте их и запустите диагностику снова.\n"
+        "  2. Настройки можно привести к рабочим: .venv\\Scripts\\python.exe -m golos.diagnose --fix\n"
+        "  3. Запуск: .\\run.bat   Подробный журнал: .\\run.bat --debug"
+    )
+    print(f"\nЖурнал: {appdata / 'golos.log'}")
+    return 0 if not failures else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -93,9 +93,10 @@ class Config:
 
     # --- потоковый режим (текст появляется по мере речи) ---
     streaming: bool = True
-    stream_step: float = 0.45      # как часто проверять новый звук
-    min_chunk_seconds: float = 1.2  # минимум звука для очередного куска
-    hold_back_seconds: float = 0.5  # сколько придерживать, чтобы не резать слово
+    stream_step: float = 0.35        # как часто проверять новый звук
+    min_chunk_seconds: float = 0.8   # минимум звука для очередного куска
+    hold_back_seconds: float = 0.3   # сколько придерживать, чтобы не резать слово
+    force_commit_seconds: float = 2.5  # после стольких секунд вставляем, не дожидаясь паузы
 
     # --- распознавание ---
     model: str = "small"
@@ -150,9 +151,10 @@ class Config:
         self.input_device = str(self.input_device or "").strip()
 
         self.beam_size = _clamp_int(self.beam_size, 1, 10, 3)
-        self.stream_step = _clamp_float(self.stream_step, 0.2, 2.0, 0.45)
-        self.min_chunk_seconds = _clamp_float(self.min_chunk_seconds, 0.6, 5.0, 1.2)
-        self.hold_back_seconds = _clamp_float(self.hold_back_seconds, 0.0, 2.0, 0.5)
+        self.stream_step = _clamp_float(self.stream_step, 0.15, 2.0, 0.35)
+        self.min_chunk_seconds = _clamp_float(self.min_chunk_seconds, 0.4, 5.0, 0.8)
+        self.hold_back_seconds = _clamp_float(self.hold_back_seconds, 0.0, 2.0, 0.3)
+        self.force_commit_seconds = _clamp_float(self.force_commit_seconds, 1.0, 15.0, 2.5)
         self.sample_rate = _clamp_int(self.sample_rate, 8000, 48000, 16000)
         self.min_duration = _clamp_float(self.min_duration, 0.1, 10.0, 0.35)
         self.paste_delay = _clamp_float(self.paste_delay, 0.0, 2.0, 0.15)
