@@ -66,6 +66,19 @@ class SingleInstance:
         self._handle = None
 
 
+def another_instance_running(name: str = "golos-single-instance") -> bool:
+    """Проверить, работает ли «Голос» прямо сейчас.
+
+    Пробуем захватить тот же lock-файл, что и основной экземпляр: если не
+    получилось — значит, кто-то его уже держит.
+    """
+    probe = SingleInstance(name)
+    if probe.acquire():
+        probe.release()
+        return False
+    return True
+
+
 # -------------------------------------------------------------------- autostart
 def _launch_command() -> str:
     """Команда автозапуска: pythonw.exe + путь к golos_app.py."""
@@ -127,6 +140,50 @@ def is_autostart_enabled() -> bool:
             winreg.QueryValueEx(key, AUTOSTART_NAME)
             return True
     except OSError:
+        return False
+
+
+def show_message(title: str, message: str) -> None:
+    """Показать сообщение даже без консоли (pythonw её не имеет).
+
+    Это единственный способ объяснить пользователю, что происходит, если
+    второй экземпляр уже работает: иначе повторный запуск выглядит как
+    «щёлкнул — и ничего».
+    """
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, message, title, 0x40)
+            return
+    except Exception as exc:  # pragma: no cover
+        log.debug("Окно сообщения недоступно: %s", exc)
+    print(f"{title}: {message}")
+
+
+def process_is_running(marker: str = "golos_app.py") -> bool:
+    """Запущен ли уже «Голос» (по списку процессов Windows)."""
+    if sys.platform != "win32":  # pragma: no cover
+        return False
+    try:
+        import subprocess
+
+        output = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe'\" "
+                "| Select-Object -ExpandProperty CommandLine",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout
+        return marker in (output or "")
+    except Exception as exc:  # pragma: no cover
+        log.debug("Не удалось проверить процессы: %s", exc)
         return False
 
 

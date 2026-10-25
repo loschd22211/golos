@@ -1,8 +1,8 @@
 @echo off
-rem Голос — единая точка входа: при первом запуске ставит зависимости, потом просто запускает.
+rem Голос — единая точка входа: при первом запуске ставит зависимости, потом запускает.
 rem
-rem   .\run.bat            — обычный запуск (без консоли, иконка в трее)
-rem   .\run.bat --show     — сразу показать окно программы
+rem   .\run.bat            — обычный запуск (с окном программы)
+rem   .\run.bat --silent   — только трей, без окна (так работает автозапуск)
 rem   .\run.bat --debug    — запуск с консолью и подробным журналом
 rem   .\run.bat --no-gui   — без интерфейса, текст печатается в консоль
 cd /d "%~dp0"
@@ -24,11 +24,47 @@ echo.
 if /i "%~1"=="--debug" goto run_debug
 if /i "%~1"=="--console" goto run_debug
 if /i "%~1"=="--no-gui" goto run_console
+
+rem Если программа уже работает — второй раз не запускаем.
+".venv\Scripts\python.exe" "golos_app.py" --status >nul 2>&1
+if not errorlevel 1 goto already_running
+
 start "" ".venv\Scripts\pythonw.exe" "golos_app.py" %*
+echo   Запускаю...
+ping -n 3 127.0.0.1 >nul 2>&1
+
+".venv\Scripts\python.exe" "golos_app.py" --status >nul 2>&1
+if errorlevel 1 goto launch_failed
+
+echo.
+echo   Готово: «Голос» работает.
+echo     - окно программы должно быть на экране;
+echo     - иконка микрофона — в трее рядом с часами (если не видно: стрелка ^);
+echo     - запись: Ctrl+Alt+Space (нажали, сказали, нажали ещё раз).
 exit /b 0
 
+:already_running
+echo.
+echo   «Голос» уже запущен — второй раз не нужно.
+echo     Иконка микрофона в трее рядом с часами (если не видно: стрелка ^).
+echo     Клавиша записи: Ctrl+Alt+Space
+echo     Окно: правый клик по иконке -^> "Открыть «Голос»"
+echo.
+echo   Если ничего не происходит — запустите диагностику: .\doctor.bat
+exit /b 0
+
+:launch_failed
+echo.
+echo   Программа не смогла запуститься. Запускаю в режиме с консолью,
+echo   чтобы показать ошибку:
+echo.
+goto run_debug
+
 :run_debug
-".venv\Scripts\python.exe" "golos_app.py" --debug
+".venv\Scripts\python.exe" "golos_app.py" --debug --show
+echo.
+echo   Ошибка выше также записана в журнал: %APPDATA%\Golos\golos.log
+echo   Полная диагностика: .\doctor.bat
 pause
 exit /b 0
 

@@ -76,3 +76,17 @@ def test_paths_created(tmp_path: Path):
 def test_replacements_cleaned():
     cfg = Config(replacements=[["a", "b"], ["", "c"], "bad", ["x"]])
     assert cfg.replacements == [["a", "b"]]
+
+
+def test_status_flag_reports_not_running():
+    """--status используется run.bat, чтобы не запускать второй экземпляр."""
+    import golos_app
+    from golos.system import SingleInstance
+
+    name = "golos-single-instance"
+    probe = SingleInstance(name)
+    assert probe.acquire(), "в тестах lock должен быть свободен"
+    probe.release()
+
+    assert golos_app.parse_args([]).status is False
+    assert golos_app.parse_args(["--status"]).status is True

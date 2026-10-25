@@ -142,3 +142,27 @@ def test_normalize_hotkey():
     assert normalize_hotkey(" Control + Shift + Esc ") == "ctrl+shift+escape"
     assert normalize_hotkey("Win+Spacebar") == "windows+space"
     assert normalize_hotkey("") == ""
+
+
+def test_another_instance_running_detects_lock():
+    import os
+
+    from golos.system import SingleInstance, another_instance_running
+
+    name = f"golos-test-{os.getpid()}"
+    assert another_instance_running(name) is False
+
+    holder = SingleInstance(name)
+    assert holder.acquire()
+    try:
+        assert another_instance_running(name) is True
+    finally:
+        holder.release()
+
+
+def test_show_message_falls_back_to_stdout(monkeypatch, capsys):
+    import golos.system as system
+
+    monkeypatch.setattr(system.sys, "platform", "linux")
+    system.show_message("Голос", "уже запущен")
+    assert "уже запущен" in capsys.readouterr().out

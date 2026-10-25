@@ -23,7 +23,8 @@ from golos import APP_NAME, APP_TITLE, __version__
 from golos.app import DictationApp, NullUi
 from golos.config import AppPaths, load_config
 from golos.logsetup import setup_logging
-from golos.system import SingleInstance, open_path
+from golos.hotkeys import pretty_hotkey
+from golos.system import SingleInstance, open_path, show_message
 
 log = logging.getLogger("golos")
 
@@ -130,18 +131,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--show", "--settings", dest="show", action="store_true",
                         help="сразу открыть окно программы")
-    parser.add_argument("--silent", action="store_true", help="не показывать консоль/логи в окне")
+    parser.add_argument("--silent", action="store_true",
+                        help="запуск в фоне: без консоли и без окна (для автозапуска)")
     parser.add_argument("--no-tray", action="store_true", help="не создавать иконку в трее")
     parser.add_argument("--no-gui", action="store_true", help="полностью без интерфейса")
     parser.add_argument("--no-preload", action="store_true", help="не загружать модель при старте")
     parser.add_argument("--config", type=str, default="", help="путь к своему config.json")
     parser.add_argument("--debug", action="store_true", help="подробный журнал")
+    parser.add_argument("--status", action="store_true",
+                        help="только проверить, запущен ли «Голос» (для скриптов)")
     parser.add_argument("--version", action="version", version=f"{APP_TITLE} {__version__}")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.status:
+        # Используется run.bat: 0 — уже работает, 1 — не запущен.
+        from golos.system import another_instance_running
+
+        running = another_instance_running()
+        print("running" if running else "not running")
+        return 0 if running else 1
+
     paths = AppPaths.default().ensure()
 
     config_path = Path(args.config) if args.config else paths.config_file
@@ -161,10 +174,15 @@ def main(argv: list[str] | None = None) -> int:
 
     single = SingleInstance()
     if not single.acquire():
-        message = "«Голос» уже запущен — ищите микрофон в системном трее."
-        log.warning(message)
+        message = (
+            "«Голос» уже запущен — второй раз его запускать не нужно.\n\n"
+            f"Клавиша записи: {pretty_hotkey(config.hotkey)}\n\n"
+            "Иконка микрофона — в трее рядом с часами. Если её не видно, "
+            "нажмите стрелку «^» слева от часов и перетащите иконку на панель."
+        )
+        log.warning("Повторный запуск: приложение уже работает")
         if not args.silent:
-            print(message)
+            show_message(APP_TITLE, message)
         return 0
 
     app = DictationApp(
@@ -257,11 +275,12 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
     tray.start()
 
     first_run = not app.transcriber.is_model_downloaded()
-    if args.show or first_run:
-        # Первый запуск: показываем окно, чтобы человек понял, что происходит.
+    # При обычном запуске окно показываем всегда: иначе непонятно, случилось ли
+    # что-то вообще (иконка в Windows 11 часто прячется в «^»).
+    if not args.silent:
         root.after(300, window.show)
-        if first_run:
-            log.info("Модель ещё не скачана — она загрузится при первом распознавании")
+    if first_run:
+        log.info("Модель ещё не скачана — она загрузится при первом распознавании")
 
     log.info("Интерфейс запущен")
     try:
