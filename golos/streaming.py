@@ -25,7 +25,7 @@ import threading
 from .audio import MicrophoneRecorder
 from .config import Config
 from .inject import InjectionError, TextInjector
-from .textproc import clean_text
+from .textproc import clean_text, looks_like_hallucination
 from .transcribe import TranscriptionError, WhisperTranscriber
 
 log = logging.getLogger(__name__)
@@ -180,6 +180,14 @@ class StreamingDictator:
         rate = int(cfg.sample_rate or 16000)
         duration = tail.size / float(rate)
 
+        # Тишину и шум в модель не отправляем: процессор не тратится, а
+        # «фантомные» фразы (титры из обучающих данных) не появляются.
+        threshold = float(getattr(cfg, "silence_threshold", 0.004) or 0.0)
+        if threshold > 0 and _rms(tail) < threshold:
+            self._commit_all(rate, tail.size)
+            log.debug("Поток: %.1f c тишины — пропущено", duration)
+            return
+
         if self._first_chunk:
             self.on_state(STATUS_LOADING, "Слушаю…")
             self._first_chunk = False
@@ -241,6 +249,11 @@ class StreamingDictator:
             return
 
         text = clean_text(raw, cfg)
+
+        if text.strip() and looks_like_hallucination(text):
+            log.info("Поток: отброшена выдумка модели %r", text[:60])
+            self._commit(rate, ready[-1]["end"])
+            return
 
         # Whisper иногда зацикливается и выдаёт один и тот же кусок снова и снова
         # (тишина, шум, обрывок фразы). Третий одинаковый подряд — почти всегда
@@ -322,6 +335,23 @@ class StreamingDictator:
 
 
 # --------------------------------------------------------------------- helpers
+def _rms(samples) -> float:
+    """Среднеквадратичная громкость куска (0 — тишина)."""
+    try:
+        # numpy приходит вместе со sounddevice — отдельный импорт не нужен,
+        # работаем с тем, что уже есть.
+        array = samples
+        if hasattr(array, "astype"):
+            array = array.astype("float32", copy=False)
+        else:  # pragma: no cover - на всякий случай
+            return 0.0
+        if array.size == 0:
+            return 0.0
+        return float((array * array).mean() ** 0.5)
+    except Exception:  # pragma: no cover
+        return 1.0  # не мешаем работе, если numpy недоступен
+
+
 def _items_from_segments(segments) -> list[dict]:
     """Разложить сегменты на минимальные единицы вставки — слова, если есть."""
     items: list[dict] = []

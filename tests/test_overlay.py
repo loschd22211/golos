@@ -27,7 +27,7 @@ class FakePaths:
     models_dir = "/tmp/golos/models"
 
 
-class FakeApp:
+class FakeApp:  # noqa: D101 - тестовая заглушка приложения
     def __init__(self, config=None):
         self.config = config or Config()
         self.paths = FakePaths()
@@ -46,6 +46,9 @@ class FakeApp:
         self.applied.append(cfg)
         self.config = cfg
         return []
+
+    def stop_recording(self):
+        self.stopped = getattr(self, "stopped", 0) + 1
 
     def insert_last(self):
         return False
@@ -68,11 +71,11 @@ def event(x, y, x_root=None, y_root=None):
 # ------------------------------------------------------------------ построение
 def test_overlay_is_tiny_and_borderless(ui):
     overlay, app, root = make_overlay(ui)
-    assert (ui["module"].WIDTH, ui["module"].HEIGHT) == (312, 92)
+    assert (ui["module"].WIDTH, ui["module"].HEIGHT) == (348, 96)
     assert root.options["overrideredirect"] is True
     assert root.options["attr:-topmost"] is True
     geometry = root.options["geometry"]
-    assert geometry.startswith("312x92+")
+    assert geometry.startswith("348x96+")
 
 
 def test_default_position_is_bottom_right(ui):
@@ -106,11 +109,17 @@ def test_drag_moves_window_and_does_not_toggle(ui):
     assert root.options["geometry"].endswith("+140+220")
 
 
-def test_close_hides_overlay(ui):
-    overlay, app, root = make_overlay(ui)
-    overlay._on_press(event(300, 80))
-    overlay._on_release(event(300, 80))
-    assert root.visible is False
+def test_close_button_quits(ui):
+    app = FakeApp()
+    root = ui["tk"].Tk()
+    called = []
+    overlay = ui["module"].Overlay(root, app, on_quit=lambda: called.append(1))
+
+    x0, y0, x1, y1 = ui["module"].button_rects(False)["close"]
+    overlay._on_press(event((x0 + x1) // 2, (y0 + y1) // 2))
+    overlay._on_release(event((x0 + x1) // 2, (y0 + y1) // 2))
+
+    assert called == [1]
 
 
 def test_right_click_opens_menu(ui):
@@ -119,6 +128,7 @@ def test_right_click_opens_menu(ui):
     assert overlay.menu.options["popup"] == (300, 400)
     labels = [label for kind, label, _ in overlay.menu.entries if kind == "command"]
     assert "Настройки…" in labels and "Выход" in labels
+    assert "Скрыть плашку" in labels
 
 
 def test_menu_quit_calls_callback(ui):
@@ -219,3 +229,82 @@ def test_settings_shorten_help_text_exists(ui):
     assert short.endswith("…")
     tail = module._tail("a" * 100 + " конец", 20)
     assert len(tail) == 20 and tail.startswith("…") and tail.endswith("конец")
+
+
+# --------------------------------------------------- кнопки: попадание и реакции
+def test_all_visible_buttons_are_clickable(ui):
+    """Рисуем и ловим клики по одним и тем же прямоугольникам.
+
+    Раньше крестик рисовался вверху справа, а зона клика была внизу справа —
+    кнопки «не реагировали».
+    """
+    overlay, app, root = make_overlay(ui)
+    for name, rect in ui["module"].button_rects(False).items():
+        x0, y0, x1, y1 = rect
+        assert overlay._hit(event(x0 + 1, y0 + 1)) == name
+        assert overlay._hit(event(x1 - 1, y1 - 1)) == name
+
+
+def test_stop_button_appears_only_while_recording(ui):
+    overlay, app, root = make_overlay(ui)
+    assert "stop" not in ui["module"].button_rects(False)
+    assert "stop" in ui["module"].button_rects(True)
+
+    overlay.set_state("recording")
+    assert "stop" in overlay._buttons()
+    texts = [item.get("text") or "" for item in overlay.canvas.items if item["kind"] == "text"]
+    assert "■" in texts
+
+
+def test_stop_button_turns_microphone_off(ui):
+    overlay, app, root = make_overlay(ui)
+    overlay.set_state("recording")
+
+    x0, y0, x1, y1 = ui["module"].button_rects(True)["stop"]
+    overlay._on_press(event((x0 + x1) // 2, (y0 + y1) // 2))
+    overlay._on_release(event((x0 + x1) // 2, (y0 + y1) // 2))
+
+    assert getattr(app, "stopped", 0) == 1
+    assert app.toggled == 0  # микрофон выключаем именно «стопом», а не toggle
+
+
+def test_settings_button_opens_settings(ui, monkeypatch):
+    overlay, app, root = make_overlay(ui)
+    opened = []
+    monkeypatch.setattr(ui["module"], "SettingsDialog", lambda *a, **k: opened.append(1))
+
+    x0, y0, x1, y1 = ui["module"].button_rects(False)["settings"]
+    overlay._on_press(event((x0 + x1) // 2, (y0 + y1) // 2))
+    overlay._on_release(event((x0 + x1) // 2, (y0 + y1) // 2))
+
+    assert opened == [1]
+
+
+def test_hover_highlights_button(ui):
+    overlay, app, root = make_overlay(ui)
+    x0, y0, x1, y1 = ui["module"].button_rects(False)["close"]
+    overlay._on_motion(event((x0 + x1) // 2, (y0 + y1) // 2))
+    assert overlay._hover == "close"
+
+    overlay._on_motion(event(160, 80))
+    assert overlay._hover == ""
+
+
+def test_press_and_release_on_different_buttons_does_nothing(ui):
+    overlay, app, root = make_overlay(ui)
+    close = ui["module"].button_rects(False)["close"]
+    gear = ui["module"].button_rects(False)["settings"]
+
+    overlay._on_press(event((close[0] + close[2]) // 2, (close[1] + close[3]) // 2))
+    overlay._on_release(event((gear[0] + gear[2]) // 2, (gear[1] + gear[3]) // 2))
+
+    assert app.toggled == 0
+
+
+def test_pressed_button_is_drawn_differently(ui):
+    overlay, app, root = make_overlay(ui)
+    x0, y0, x1, y1 = ui["module"].button_rects(False)["settings"]
+    before = len(overlay.canvas.items)
+    overlay._on_press(event((x0 + x1) // 2, (y0 + y1) // 2))
+    assert overlay._pressed == "settings"
+    assert len(overlay.canvas.items) >= before

@@ -75,6 +75,24 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok "Зависимости установлены"
 
+# --------------------------------------------------- 3.1 библиотеки CUDA (для GPU)
+# Без них faster-whisper не поднимет видеокарту (cublas64_12.dll not found),
+# и всё считается на процессоре — это в разы медленнее. Ставим те же DLL
+# из pip-пакетов, чтобы не требовать CUDA Toolkit на несколько гигабайт.
+$nvidia = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match "NVIDIA" }
+if ($nvidia) {
+    Write-Step "Ставлю библиотеки CUDA для видеокарты (один раз, ~1 ГБ, потом быстро)"
+    & cmd /c "`"$venvPython`" -m pip install --quiet nvidia-cublas-cu12 nvidia-cudnn-cu12"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Библиотеки CUDA не установились — работаем на процессоре (медленнее)."
+    } else {
+        Write-Ok "Библиотеки CUDA установлены — распознавание пойдёт на видеокарте"
+    }
+} else {
+    Write-Ok "Видеокарта NVIDIA не найдена — работаем на процессоре"
+}
+
 # ------------------------------------------------------------------ 4. ярлыки
 Write-Step "Создаю ярлык «Голос»"
 

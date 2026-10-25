@@ -22,6 +22,13 @@ if errorlevel 1 goto fail
 echo.
 git log -1 --oneline
 echo.
+
+if exist ".venv\Scripts\python.exe" (
+    echo   Проверяю зависимости и библиотеки CUDA...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" -Quiet
+)
+
+echo.
 echo   Готово. Запускаю.
 echo.
 call "%~dp0run.bat" %*
