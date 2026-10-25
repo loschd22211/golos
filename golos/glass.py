@@ -24,8 +24,16 @@ _IS_WINDOWS = sys.platform == "win32"
 # Значения для SetWindowCompositionAttribute (не документированы, но стабильны
 # на Windows 10/11 — на них работают все «акриловые» окна).
 _WCA_ACCENT_POLICY = 19
+_ACCENT_DISABLED = 0
 _ACCENT_ENABLE_BLURBEHIND = 3
 _ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
+
+# Флаги SetWindowPos
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 
 
 def _parse_tint(tint) -> tuple[int, int, int]:
@@ -46,10 +54,10 @@ def panel_image(
     width: int,
     height: int,
     radius: int = 22,
-    tint="#1a2130",
-    top_alpha: int = 202,
-    bottom_alpha: int = 224,
-    border_alpha: int = 44,
+    tint="#1b2231",
+    top_alpha: int = 232,
+    bottom_alpha: int = 248,
+    border_alpha: int = 56,
 ):
     """Панель «матовое стекло»: вертикальный градиент, блик и тонкая рамка.
 
@@ -138,15 +146,11 @@ def _window_handle(root) -> int:
     return 0
 
 
-def round_window(root, radius: int = 20) -> bool:
-    """Скруглить углы окна по его фактическому размеру (учитывая DPI)."""
-    if not _IS_WINDOWS:  # pragma: no cover
-        return False
-    hwnd = _window_handle(root)
-    if not hwnd:
-        return False
+def _rect_size(hwnd: int, root) -> tuple[int, int]:
+    """Размер окна в тех же координатах, в которых работает SetWindowRgn."""
     try:
         import ctypes
+        from ctypes import wintypes
 
         class RECT(ctypes.Structure):
             _fields_ = [
@@ -157,26 +161,141 @@ def round_window(root, radius: int = 20) -> bool:
             ]
 
         user32 = ctypes.windll.user32
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(RECT)]
+        user32.GetWindowRect.restype = wintypes.BOOL
         rect = RECT()
-        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            width = int(rect.right - rect.left)
+            height = int(rect.bottom - rect.top)
+            if width > 1 and height > 1:
+                return width, height
+    except Exception as exc:  # pragma: no cover
+        log.debug("GetWindowRect не сработал: %s", exc)
+
+    # Окно ещё не показано — берём размер из Tk.
+    try:
+        return int(root.winfo_width()), int(root.winfo_height())
+    except Exception:  # pragma: no cover
+        return 0, 0
+
+
+def round_window(root, radius: int = 20) -> bool:
+    """Скруглить углы окна.
+
+    ``CreateRoundRectRgn`` возвращает HANDLE (указатель). Если не задать
+    ``restype``, ctypes обрежет его до 32 бит, ``SetWindowRgn`` получит мусор и
+    вернёт ошибку — окно останется квадратным (ровно это и видел пользователь:
+    «серый квадрат» вокруг плашки).
+    """
+    if not _IS_WINDOWS:  # pragma: no cover
+        return False
+    hwnd = _window_handle(root)
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        width, height = _rect_size(hwnd, root)
+        if width <= 1 or height <= 1:  # pragma: no cover - окно ещё без размера
             return False
-        width = int(rect.right - rect.left)
-        height = int(rect.bottom - rect.top)
-        if width <= 0 or height <= 0:  # pragma: no cover
-            return False
+
+        radius = max(0, int(radius))
+        user32.CreateRoundRectRgn.argtypes = [ctypes.c_int] * 6
+        user32.CreateRoundRectRgn.restype = wintypes.HANDLE
+        user32.SetWindowRgn.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.BOOL]
+        user32.SetWindowRgn.restype = ctypes.c_int
+
+        # +1 к правому/нижнему краю: так рекомендуют в документации WinAPI,
+        # иначе крайняя строка пикселей не попадает в регион.
         region = user32.CreateRoundRectRgn(
-            0, 0, width + 1, height + 1, int(radius) * 2, int(radius) * 2
+            0, 0, width + 1, height + 1, radius * 2, radius * 2
         )
         if not region:  # pragma: no cover
+            log.debug("CreateRoundRectRgn вернул пустой регион")
             return False
-        return bool(user32.SetWindowRgn(hwnd, region, True))
+
+        if not user32.SetWindowRgn(hwnd, region, True):
+            log.debug("SetWindowRgn не применился")
+            return False
+
+        # Без SetWindowPos со SWP_FRAMECHANGED Windows иногда показывает окно
+        # со старым (прямоугольным) регионом до следующего изменения размера.
+        user32.SetWindowPos(
+            hwnd, 0, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE,
+        )
+        return True
     except Exception as exc:  # pragma: no cover
         log.debug("Скругление окна не удалось: %s", exc)
         return False
 
 
-def enable_blur(root, tint="#141a26", opacity: float = 0.55, acrylic: bool = True) -> bool:
-    """Включить размытие фона за окном (акрил Windows 10/11)."""
+def has_region(root) -> bool:
+    """Проверить, что у окна действительно стоит скруглённый регион.
+
+    ``GetWindowRgn`` возвращает тип региона: 0 — ошибка, 1 — пусто, 2/3 —
+    простой/сложный регион. Нужен для журнала: если регион не встал, вокруг
+    плашки будет виден прямоугольник.
+    """
+    if not _IS_WINDOWS:  # pragma: no cover
+        return False
+    hwnd = _window_handle(root)
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.CreateRectRgn.argtypes = [ctypes.c_int] * 4
+        user32.CreateRectRgn.restype = wintypes.HANDLE
+        user32.GetWindowRgn.argtypes = [wintypes.HWND, wintypes.HANDLE]
+        user32.GetWindowRgn.restype = ctypes.c_int
+        user32.DeleteObject.argtypes = [wintypes.HANDLE]
+        user32.DeleteObject.restype = wintypes.BOOL
+
+        region = user32.CreateRectRgn(0, 0, 0, 0)
+        if not region:  # pragma: no cover
+            return False
+        try:
+            kind = int(user32.GetWindowRgn(hwnd, region))
+        finally:
+            user32.DeleteObject(region)
+        return kind in (2, 3)
+    except Exception as exc:  # pragma: no cover
+        log.debug("GetWindowRgn не сработал: %s", exc)
+        return False
+
+
+def clear_region(root) -> bool:
+    """Снять скругление (прямоугольное окно) — нужно при смене вида."""
+    if not _IS_WINDOWS:  # pragma: no cover
+        return False
+    hwnd = _window_handle(root)
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.SetWindowRgn.argtypes = [wintypes.HWND, wintypes.HANDLE, wintypes.BOOL]
+        return bool(user32.SetWindowRgn(hwnd, None, True))
+    except Exception as exc:  # pragma: no cover
+        log.debug("Снять регион не удалось: %s", exc)
+        return False
+
+
+def enable_blur(root, tint="#141a26", opacity: float = 0.42, acrylic: bool = True) -> bool:
+    """Включить размытие фона за окном (акрил Windows 10/11).
+
+    Работает только вместе со скруглением: акрил красит **весь прямоугольник**
+    окна, и если углы не срезаны регионом, вокруг плашки появляется серый
+    квадрат. Поэтому ``apply_glass`` вызывает эту функцию лишь после успешного
+    ``round_window``.
+    """
     if not _IS_WINDOWS:  # pragma: no cover
         return False
     hwnd = _window_handle(root)
@@ -218,10 +337,56 @@ def enable_blur(root, tint="#141a26", opacity: float = 0.55, acrylic: bool = Tru
         data.Attribute = _WCA_ACCENT_POLICY
         data.SizeOfData = ctypes.sizeof(accent)
         data.Data = ctypes.cast(ctypes.pointer(accent), ctypes.POINTER(ctypes.c_int))
+
+        setter.argtypes = [ctypes.c_void_p, ctypes.POINTER(WINCOMPATTRDATA)]
         setter.restype = ctypes.c_bool
-        return bool(setter(hwnd, ctypes.byref(data)))
+        return bool(setter(ctypes.c_void_p(hwnd), ctypes.byref(data)))
     except Exception as exc:  # pragma: no cover
         log.debug("Размытие фона недоступно: %s", exc)
+        return False
+
+
+def disable_blur(root) -> bool:
+    """Выключить размытие (AccentState = 0), чтобы вернуть обычное окно."""
+    if not _IS_WINDOWS:  # pragma: no cover
+        return False
+    hwnd = _window_handle(root)
+    if not hwnd:
+        return False
+    try:
+        import ctypes
+
+        class ACCENTPOLICY(ctypes.Structure):
+            _fields_ = [
+                ("AccentState", ctypes.c_int),
+                ("AccentFlags", ctypes.c_int),
+                ("GradientColor", ctypes.c_uint),
+                ("AnimationId", ctypes.c_int),
+            ]
+
+        class WINCOMPATTRDATA(ctypes.Structure):
+            _fields_ = [
+                ("Attribute", ctypes.c_int),
+                ("Data", ctypes.POINTER(ctypes.c_int)),
+                ("SizeOfData", ctypes.c_size_t),
+            ]
+
+        user32 = ctypes.windll.user32
+        setter = getattr(user32, "SetWindowCompositionAttribute", None)
+        if setter is None:  # pragma: no cover
+            return False
+
+        accent = ACCENTPOLICY()
+        accent.AccentState = _ACCENT_DISABLED
+        data = WINCOMPATTRDATA()
+        data.Attribute = _WCA_ACCENT_POLICY
+        data.SizeOfData = ctypes.sizeof(accent)
+        data.Data = ctypes.cast(ctypes.pointer(accent), ctypes.POINTER(ctypes.c_int))
+        setter.argtypes = [ctypes.c_void_p, ctypes.POINTER(WINCOMPATTRDATA)]
+        setter.restype = ctypes.c_bool
+        return bool(setter(ctypes.c_void_p(hwnd), ctypes.byref(data)))
+    except Exception as exc:  # pragma: no cover
+        log.debug("Выключить размытие не удалось: %s", exc)
         return False
 
 
@@ -236,12 +401,32 @@ def set_opacity(root, opacity: float) -> bool:
         return False
 
 
-def apply_glass(root, radius: int = 20, opacity: float = 0.93, blur: bool = True) -> dict:
-    """Применить весь «стеклянный» набор. Возвращает отчёт (для журнала/тестов)."""
+def apply_glass(root, radius: int = 20, opacity: float = 0.94, blur: bool = False) -> dict:
+    """Применить весь «стеклянный» набор. Возвращает отчёт (для журнала/тестов).
+
+    Порядок важен: сначала скругляем окно, и только потом включаем акрил.
+    Иначе прозрачные углы панели закрашиваются серым фоном акрила — то самое
+    «просто серый квадрат».
+    """
+    rounded = round_window(root, radius)
+    blurred = False
+    if blur:
+        if rounded:
+            blurred = enable_blur(root)
+        else:
+            log.info(
+                "Скругление не сработало — размытие выключено, чтобы не было "
+                "серого квадрата вокруг плашки"
+            )
+            disable_blur(root)
+    else:
+        disable_blur(root)
+
     report = {
         "opacity": set_opacity(root, opacity),
-        "rounded": round_window(root, radius),
-        "blur": enable_blur(root) if blur else False,
+        "rounded": rounded,
+        "region": has_region(root),
+        "blur": blurred,
     }
     log.debug("Стекло: %s", report)
     return report

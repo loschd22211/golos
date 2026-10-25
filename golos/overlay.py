@@ -193,20 +193,59 @@ class Overlay:
         self.apply_look()
 
     # -------------------------------------------------------------------- вид
-    def apply_look(self) -> None:
-        """Применить «стекло»: прозрачность, скруглённые углы, размытие фона."""
+    def apply_look(self, retries: int = 2) -> None:
+        """Применить «стекло»: прозрачность, скруглённые углы, размытие фона.
+
+        ``retries`` — сколько раз повторить, если окно ещё не показано: до
+        первого ``deiconify`` у него может не быть размера, и скруглить его
+        нечем. Раньше из-за этого оставался «серый квадрат» вокруг плашки.
+        """
         cfg = self.app.config
         try:
-            opacity = float(getattr(cfg, "overlay_opacity", 0.93) or 0.93)
+            opacity = float(getattr(cfg, "overlay_opacity", 0.94) or 0.94)
         except (TypeError, ValueError):  # pragma: no cover
-            opacity = 0.93
-        blur = bool(getattr(cfg, "overlay_glass", True))
+            opacity = 0.94
+        blur = bool(getattr(cfg, "overlay_glass", False))
+
+        report = {}
         try:
-            glass.apply_glass(self.root, radius=PANEL_RADIUS, opacity=opacity, blur=blur)
+            report = glass.apply_glass(
+                self.root, radius=PANEL_RADIUS, opacity=opacity, blur=blur
+            )
         except Exception as exc:  # pragma: no cover - экзотическая система
             log.debug("Стекло недоступно: %s", exc)
+
+        if report:
+            log.info(
+                "Вид плашки: скругление=%s (регион=%s), размытие=%s, "
+                "прозрачность=%.2f",
+                report.get("rounded"),
+                report.get("region"),
+                report.get("blur"),
+                opacity,
+            )
+
+        if report and not report.get("rounded"):
+            # Скругление не вышло: показываем скруглённую панель «по цвету»
+            # прозрачности — так углы не превращаются в серые квадраты.
+            self._use_color_key(True)
+            if retries > 0:
+                try:
+                    self.root.after(140, lambda: self.apply_look(retries - 1))
+                except tk.TclError:  # pragma: no cover
+                    pass
+        else:
+            self._use_color_key(False)
+
         self._build_panel()
         self._draw()
+
+    def _use_color_key(self, enabled: bool) -> None:
+        """Запасной путь: сделать фон плашки прозрачным по цвету (Windows)."""
+        try:
+            self.root.attributes("-transparentcolor", BG if enabled else "")
+        except tk.TclError:  # pragma: no cover - не Windows
+            pass
 
     def _build_panel(self) -> None:
         """Собрать картинку панели (градиент, блик, рамка) один раз."""
@@ -443,6 +482,7 @@ class Overlay:
             winfocus.make_no_activate(self.root)
             winfocus.keep_on_top(self.root, True)
             # Окно могли пересоздать — стекло и скругление ставим заново.
+            self.root.update_idletasks()
             self.apply_look()
         except tk.TclError:  # pragma: no cover
             pass
@@ -529,8 +569,8 @@ class SettingsDialog:
         self.autostart = tk.BooleanVar(value=cfg.autostart)
         self.admin_rights = tk.BooleanVar(value=getattr(cfg, "run_as_admin", True))
         self.sound = tk.BooleanVar(value=cfg.sound_feedback)
-        self.glass = tk.BooleanVar(value=bool(getattr(cfg, "overlay_glass", True)))
-        opacity = float(getattr(cfg, "overlay_opacity", 0.93) or 0.93)
+        self.glass = tk.BooleanVar(value=bool(getattr(cfg, "overlay_glass", False)))
+        opacity = float(getattr(cfg, "overlay_opacity", 0.94) or 0.94)
         self.opacity = tk.StringVar(
             value=min(GLASS_LEVELS, key=lambda name: abs(GLASS_LEVELS[name] - opacity))
         )

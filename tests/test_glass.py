@@ -82,5 +82,59 @@ def test_opacity_errors_do_not_crash():
 def test_apply_glass_reports_result(monkeypatch):
     monkeypatch.setattr(glass, "_IS_WINDOWS", False)
     report = glass.apply_glass(FakeRoot(), radius=22, opacity=0.8, blur=False)
-    assert set(report) == {"opacity", "rounded", "blur"}
+    assert set(report) == {"opacity", "rounded", "region", "blur"}
     assert report["opacity"] is True
+
+
+# ------------------------------- серый квадрат: акрил без скругления (1.4.1)
+def _fake_root(_window_handle=1234):
+    return FakeRoot()
+
+
+def test_blur_is_not_enabled_when_rounding_fails(monkeypatch):
+    """Акрил красит весь прямоугольник — без скругления это «серый квадрат»."""
+    monkeypatch.setattr(glass, "_IS_WINDOWS", True)
+    monkeypatch.setattr(glass, "round_window", lambda root, radius=20: False)
+    enabled = []
+    disabled = []
+    monkeypatch.setattr(glass, "enable_blur", lambda *a, **k: enabled.append(1) or True)
+    monkeypatch.setattr(glass, "disable_blur", lambda *a, **k: disabled.append(1) or True)
+
+    report = glass.apply_glass(FakeRoot(), blur=True)
+
+    assert report["rounded"] is False
+    assert report["blur"] is False
+    assert enabled == [], "размытие нельзя включать, если углы не срезаны"
+    assert disabled == [1], "прежнее размытие нужно снять"
+
+
+def test_blur_is_enabled_after_rounding(monkeypatch):
+    monkeypatch.setattr(glass, "_IS_WINDOWS", True)
+    monkeypatch.setattr(glass, "round_window", lambda root, radius=20: True)
+    monkeypatch.setattr(glass, "enable_blur", lambda *a, **k: True)
+    monkeypatch.setattr(glass, "has_region", lambda root: True)
+    report = glass.apply_glass(FakeRoot(), blur=True)
+    assert report == {"opacity": True, "rounded": True, "region": True, "blur": True}
+
+
+def test_blur_is_off_by_default(monkeypatch):
+    monkeypatch.setattr(glass, "_IS_WINDOWS", True)
+    monkeypatch.setattr(glass, "round_window", lambda root, radius=20: True)
+    called = []
+    monkeypatch.setattr(glass, "enable_blur", lambda *a, **k: called.append(1) or True)
+    monkeypatch.setattr(glass, "disable_blur", lambda *a, **k: True)
+    report = glass.apply_glass(FakeRoot())
+    assert report["blur"] is False and called == []
+
+
+def test_has_region_is_safe_outside_windows(monkeypatch):
+    monkeypatch.setattr(glass, "_IS_WINDOWS", False)
+    assert glass.has_region(FakeRoot()) is False
+
+
+def test_config_defaults_to_no_blur():
+    from golos.config import Config
+
+    cfg = Config()
+    assert cfg.overlay_glass is False, "акрил по умолчанию выключен"
+    assert 0.35 <= cfg.overlay_opacity <= 1.0
