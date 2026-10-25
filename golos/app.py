@@ -207,6 +207,9 @@ class DictationApp:
             self._fail(str(exc))
             return False
 
+        # Запоминаем окно, где стоял курсор, и держим его до конца диктовки:
+        # переключение вкладок/окон во время речи не должно уводить текст.
+        self._pin_target()
         self._register_cancel_hotkey()
         if self.config.sound_feedback:
             beep("start")
@@ -285,6 +288,26 @@ class DictationApp:
             beep("stop")
         self._set_state(IDLE)
         self.ui.on_notify("Голос", "Запись отменена")
+
+    # ------------------------------------------------------------------- цель
+    def _pin_target(self) -> None:
+        """Закрепить окно-получатель на время диктовки (если трекер подключён)."""
+        if not getattr(self.config, "pin_target", True):
+            return
+        pin = getattr(getattr(self, "tracker", None), "pin", None)
+        if callable(pin):
+            try:
+                pin()
+            except Exception as exc:  # pragma: no cover - не критично
+                log.debug("Не удалось закрепить окно: %s", exc)
+
+    def _unpin_target(self) -> None:
+        unpin = getattr(getattr(self, "tracker", None), "unpin", None)
+        if callable(unpin):
+            try:
+                unpin()
+            except Exception as exc:  # pragma: no cover
+                log.debug("Не удалось снять закрепление окна: %s", exc)
 
     def pause(self, value: bool | None = None) -> bool:
         """Включить/выключить паузу (клавиши перестают реагировать)."""
@@ -511,6 +534,9 @@ class DictationApp:
         self._fail(message)
 
     def _set_state(self, state: str, message: str = "") -> None:
+        if state == IDLE:
+            # Диктовка закончилась — окно-получатель снова не закреплено.
+            self._unpin_target()
         self.state = state
         if state != ERROR:
             self.last_error = ""

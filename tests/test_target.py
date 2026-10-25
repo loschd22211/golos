@@ -227,3 +227,51 @@ def test_app_wires_focus_hook_into_injector(monkeypatch):
     assert app.injector.focus is not None
     app.injector.focus()
     assert called
+
+
+# ------------------------------------------------- закрепление цели (1.4)
+def test_pinned_target_is_not_replaced_by_other_windows(monkeypatch):
+    """Переключился на другую вкладку/окно во время речи — текст всё равно туда."""
+    monkeypatch.setattr(winfocus, "is_window", lambda hwnd: True)
+    monkeypatch.setattr(winfocus, "is_our_window", lambda hwnd: hwnd == 111)
+    monkeypatch.setattr(winfocus, "get_foreground_window", lambda: 222)
+
+    tracker = winfocus.TargetTracker()
+    assert tracker.pin() == 222
+    assert tracker.pinned == 222
+
+    # Человек ушёл в другое окно — цель не меняется.
+    assert tracker.remember(333) is False
+    assert tracker.hwnd == 222
+    assert tracker.pinned == 222
+
+    tracker.unpin()
+    assert tracker.pinned == 0
+    assert tracker.remember(333) is True
+    assert tracker.hwnd == 333
+
+
+def test_pin_skips_our_own_window(monkeypatch):
+    monkeypatch.setattr(winfocus, "is_window", lambda hwnd: True)
+    monkeypatch.setattr(winfocus, "is_our_window", lambda hwnd: hwnd == 111)
+    monkeypatch.setattr(winfocus, "get_foreground_window", lambda: 111)
+
+    tracker = winfocus.TargetTracker()
+    tracker.remember(222)
+    assert tracker.pin() == 222, "клик по плашке не должен делать целью саму плашку"
+
+
+def test_activate_uses_pinned_window(monkeypatch):
+    monkeypatch.setattr(winfocus, "is_window", lambda hwnd: True)
+    monkeypatch.setattr(winfocus, "is_our_window", lambda hwnd: False)
+    monkeypatch.setattr(winfocus, "get_foreground_window", lambda: 333)
+    called = {}
+    monkeypatch.setattr(winfocus, "activate_window",
+                        lambda hwnd, attempts=3, pause=0.04: called.setdefault("hwnd", hwnd) or True)
+
+    tracker = winfocus.TargetTracker()
+    tracker.remember(333)
+    tracker.pin()
+    called.clear()
+    assert tracker.activate() is True
+    assert called["hwnd"] == 333, "фокус возвращаем закреплённому окну"

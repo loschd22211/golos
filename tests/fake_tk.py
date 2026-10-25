@@ -185,6 +185,9 @@ class FakeCanvas(FakeWidget):
     def create_polygon(self, *args, **kwargs):
         return self._add("polygon", args, kwargs)
 
+    def create_image(self, *args, **kwargs):
+        return self._add("image", args, kwargs)
+
     def delete(self, *args):
         if not args or args[0] == "all":
             self.items.clear()

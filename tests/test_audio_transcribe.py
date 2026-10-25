@@ -361,3 +361,72 @@ def test_cuda_hint_variants():
     assert "видеопамяти" in _cuda_hint(RuntimeError("CUDA out of memory"))
     assert "cublas" in _cuda_hint(RuntimeError("cublas64_12.dll not found"))
     assert _cuda_hint(RuntimeError("что-то ещё")).startswith("Причина:")
+
+
+# ------------------------------------------------ язык сеанса при "auto" (1.4)
+class LangModel(FakeModel):
+    """Модель, которая сообщает определённый язык и уверенность."""
+
+    def __init__(self, language, probability, segments=None):
+        super().__init__(segments or [FakeSegment("привет")])
+        self.info = types.SimpleNamespace(
+            language=language, language_probability=probability
+        )
+
+    def transcribe(self, audio, **params):
+        self.captured.update(params)
+        return iter(self.segments), self.info
+
+
+def make_auto_transcriber(monkeypatch, tmp_path, language, probability):
+    from golos.transcribe import WhisperTranscriber
+
+    model = LangModel(language, probability)
+    transcriber = WhisperTranscriber(Config(language="auto"), tmp_path)
+    monkeypatch.setattr(transcriber, "_ensure_model", lambda: model)
+    transcriber.begin_session()
+    return transcriber, model
+
+
+def test_auto_language_is_locked_per_session(monkeypatch, tmp_path):
+    """«auto» больше не скачет между русским и английским внутри диктовки."""
+    transcriber, model = make_auto_transcriber(monkeypatch, tmp_path, "ru", 0.95)
+    audio = np.full(int(16000 * 3.0), 0.1, dtype=np.float32)
+
+    transcriber.segments(audio, transcriber.config)
+    assert transcriber._session_language == "ru"
+    assert model.captured["language"] is None, "первый кусок — автоопределение"
+
+    transcriber.segments(audio, transcriber.config)
+    assert model.captured["language"] == "ru", "дальше язык сеанса фиксирован"
+
+
+def test_begin_session_resets_language(monkeypatch, tmp_path):
+    from golos.transcribe import WhisperTranscriber
+
+    transcriber = WhisperTranscriber(Config(language="auto"), tmp_path)
+    transcriber._session_language = "en"
+    transcriber.begin_session()
+    assert transcriber._session_language == ""
+
+
+def test_low_confidence_does_not_lock_language(monkeypatch, tmp_path):
+    transcriber, _model = make_auto_transcriber(monkeypatch, tmp_path, "en", 0.4)
+    audio = np.full(int(16000 * 3.0), 0.1, dtype=np.float32)
+
+    transcriber.segments(audio, transcriber.config)
+    assert transcriber._session_language == "", "неуверенное определение не фиксируем"
+
+
+def test_language_is_not_locked_in_fixed_mode(monkeypatch, tmp_path):
+    from golos.transcribe import WhisperTranscriber
+
+    model = LangModel("en", 0.99)
+    transcriber = WhisperTranscriber(Config(language="ru"), tmp_path)
+    monkeypatch.setattr(transcriber, "_ensure_model", lambda: model)
+    transcriber.begin_session()
+    transcriber.segments(np.full(int(16000 * 2.0), 0.1, dtype=np.float32),
+                         transcriber.config)
+
+    assert model.captured["language"] == "ru"
+    assert transcriber._session_language == ""

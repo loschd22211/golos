@@ -349,6 +349,7 @@ class TargetTracker:
     def __init__(self, interval: float = 0.15):
         self.interval = interval
         self._hwnd = 0
+        self._pinned = 0      # окно, закреплённое на время диктовки
         self._thread = None
         self._stop = False
 
@@ -389,7 +390,14 @@ class TargetTracker:
         return self.remember(get_foreground_window())
 
     def remember(self, hwnd: int | None) -> bool:
-        """Запомнить окно, если оно чужое и живое."""
+        """Запомнить окно, если оно чужое и живое.
+
+        Пока цель закреплена (идёт диктовка), новые окна не запоминаются:
+        иначе переключение на другую вкладку/окно во время речи уводило
+        текст не туда.
+        """
+        if self._pinned:
+            return False
         if not hwnd:
             return False
         if not is_window(hwnd):
@@ -401,10 +409,41 @@ class TargetTracker:
 
     @property
     def hwnd(self) -> int:
-        return self._hwnd
+        return self._pinned or self._hwnd
+
+    @property
+    def pinned(self) -> int:
+        """Окно, закреплённое под текущую диктовку (0 — не закреплено)."""
+        return self._pinned
+
+    # ------------------------------------------------------------------- закрепление
+    def pin(self) -> int:
+        """Закрепить текущее чужое окно: дальше пишем только в него."""
+        self._pinned = 0
+        self.remember_current()
+        self._pinned = self._hwnd
+        if self._pinned:
+            log.info("Цель вставки закреплена: hwnd=%s «%s»",
+                     self._pinned, window_title(self._pinned))
+        else:
+            log.warning("Цель вставки не определена: активное окно наше или пустое")
+        return self._pinned
+
+    def unpin(self) -> None:
+        """Снять закрепление (диктовка закончилась)."""
+        if self._pinned:
+            log.debug("Закрепление цели снято (hwnd=%s)", self._pinned)
+        self._pinned = 0
 
     def activate(self) -> bool:
-        """Сделать запомненное окно активным перед вставкой."""
+        """Сделать запомненное (или закреплённое) окно активным перед вставкой."""
+        if self._pinned and is_window(self._pinned):
+            # Закреплённая цель: возвращаем фокус именно ей, даже если человек
+            # успел переключиться на другое окно.
+            ok = activate_window(self._pinned)
+            if ok:
+                return True
+            log.warning("Закреплённое окно %s не принимает фокус", self._pinned)
         if not self._hwnd:
             self.remember_current()
         if not self._hwnd:

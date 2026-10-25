@@ -140,6 +140,13 @@ class Config:
     remove_fillers: bool = False
 
     # --- интерфейс / прочее ---
+    # Плашка — «стекло»: полупрозрачная, со скруглёнными углами. Размытие фона
+    # работает на Windows 10/11 (акрил); прозрачность регулируется 0.35–1.0.
+    overlay_glass: bool = True
+    overlay_opacity: float = 0.93
+    # Держать окно-получатель закреплённым на время диктовки: переключение
+    # вкладок не уводит текст. Выключите, если мешает возврат фокуса.
+    pin_target: bool = True
     sound_feedback: bool = True
     notifications: bool = True
     autostart: bool = False
@@ -182,6 +189,9 @@ class Config:
         self.sample_rate = _clamp_int(self.sample_rate, 8000, 48000, 16000)
         self.min_duration = _clamp_float(self.min_duration, 0.1, 10.0, 0.35)
         self.paste_delay = _clamp_float(self.paste_delay, 0.0, 2.0, 0.15)
+        self.overlay_opacity = _clamp_float(self.overlay_opacity, 0.35, 1.0, 0.93)
+        self.overlay_glass = _as_bool(self.overlay_glass, True)
+        self.pin_target = _as_bool(self.pin_target, True)
         self.run_as_admin = _as_bool(self.run_as_admin, True)
         self.replacements = _clean_replacements(self.replacements)
 
