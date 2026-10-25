@@ -40,6 +40,9 @@ class WhisperTranscriber:
         self.models_dir = Path(models_dir) if models_dir else None
         self._model = None
         self._model_key: tuple | None = None
+        self.active_device = ""      # на чём реально работаем: cpu / cuda
+        self.active_compute = ""
+        self.fallback_reason = ""    # почему не взлетела видеокарта
         self._lock = threading.RLock()
         self._load_lock = threading.Lock()
 
@@ -133,6 +136,11 @@ class WhisperTranscriber:
                             **({"download_root": kwargs["download_root"]} if "download_root" in kwargs else {}),
                         )
                         device, compute_type = "cpu", "int8"
+                        self.fallback_reason = _cuda_hint(exc)
+                        log.warning(
+                            "Видеокарта недоступна, работаю на CPU/int8. %s",
+                            self.fallback_reason,
+                        )
                     except Exception as exc2:
                         raise _load_error(cfg.model, exc2) from exc2
                 else:
@@ -141,6 +149,8 @@ class WhisperTranscriber:
             with self._lock:
                 self._model = model
                 self._model_key = (cfg.model, device, compute_type)
+                self.active_device = device
+                self.active_compute = compute_type
             log.info("Модель готова: %s/%s", device, compute_type)
             return model
 
@@ -288,6 +298,20 @@ def resolve_compute_type(device: str, preferred: str) -> str:
     if preferred != "auto":
         return preferred
     return "float16" if device == "cuda" else "int8"
+
+
+def _cuda_hint(exc: Exception) -> str:
+    """Человеческое объяснение, почему CUDA не завелась."""
+    text = str(exc).lower()
+    if "cublas" in text or "cudnn" in text or "dll" in text:
+        return (
+            "Не хватает библиотек CUDA (cublas64_12.dll / cudnn). "
+            "Либо поставьте их, либо оставьте работу на процессоре: "
+            "в config.json \"device\": \"cpu\"."
+        )
+    if "out of memory" in text:
+        return "Не хватило видеопамяти — возьмите модель поменьше."
+    return "Причина: " + str(exc)[:200]
 
 
 def _load_error(model: str, exc: Exception) -> TranscriptionError:

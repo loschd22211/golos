@@ -330,3 +330,34 @@ def test_resolve_device_and_compute_type(monkeypatch):
     assert resolve_compute_type("cpu", "auto") == "int8"
     assert resolve_compute_type("cuda", "auto") == "float16"
     assert resolve_compute_type("cpu", "float32") == "float32"
+
+
+# ------------------------------------------------- откат с CUDA на процессор
+def test_cuda_fallback_reason_is_explained(monkeypatch, tmp_path):
+    """cublas64_12.dll отсутствует — должно быть понятное объяснение."""
+    module = types.ModuleType("faster_whisper")
+
+    def WhisperModel(name, **kwargs):
+        if kwargs.get("device") == "cuda":
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+        return FakeModel([FakeSegment("ок")])
+
+    module.WhisperModel = WhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+    monkeypatch.setattr("golos.transcribe.resolve_device", lambda _d: "cuda")
+
+    transcriber = WhisperTranscriber(Config(device="cuda"), tmp_path)
+    transcriber.preload()
+
+    assert transcriber.active_device == "cpu"
+    assert transcriber.active_compute == "int8"
+    assert "cublas64_12.dll" in transcriber.fallback_reason
+    assert transcriber.is_ready
+
+
+def test_cuda_hint_variants():
+    from golos.transcribe import _cuda_hint
+
+    assert "видеопамяти" in _cuda_hint(RuntimeError("CUDA out of memory"))
+    assert "cublas" in _cuda_hint(RuntimeError("cublas64_12.dll not found"))
+    assert _cuda_hint(RuntimeError("что-то ещё")).startswith("Причина:")
