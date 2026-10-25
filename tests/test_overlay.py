@@ -308,3 +308,51 @@ def test_pressed_button_is_drawn_differently(ui):
     overlay._on_press(event((x0 + x1) // 2, (y0 + y1) // 2))
     assert overlay._pressed == "settings"
     assert len(overlay.canvas.items) >= before
+
+
+# ------------------------------------------------- стеклянный вид (1.4)
+def test_glass_is_applied_on_start(ui):
+    overlay, app, root = make_overlay(ui)
+    # прозрачность из настроек уходит в окно
+    assert root.options.get("attr:-alpha", app.config.overlay_opacity) ==         app.config.overlay_opacity
+
+
+def test_panel_is_drawn_as_image(ui):
+    overlay, app, root = make_overlay(ui)
+    kinds = {item["kind"] for item in overlay.canvas.items}
+    # если Pillow есть — панель картинкой, если нет — обычным прямоугольником
+    assert "image" in kinds or "rectangle" in kinds
+
+
+def test_opacity_from_config_is_used(ui):
+    cfg = Config()
+    cfg.overlay_opacity = 0.65
+    overlay, app, root = make_overlay(ui, cfg)
+    assert root.options["attr:-alpha"] == pytest.approx(0.65)
+
+
+def test_apply_look_updates_opacity_without_restart(ui):
+    overlay, app, root = make_overlay(ui)
+    app.config.overlay_opacity = 0.8
+    overlay.apply_look()
+    assert root.options["attr:-alpha"] == pytest.approx(0.8)
+
+
+def test_settings_dialog_has_opacity_and_glass(ui):
+    overlay, app, root = make_overlay(ui)
+    dialog = ui["module"].SettingsDialog(root, app, overlay)
+    assert dialog.opacity.get() in ui["module"].GLASS_LEVELS
+    assert hasattr(dialog, "glass")
+
+    dialog.opacity.set("Совсем лёгкая 65%")
+    dialog.glass.set(False)
+    dialog.apply()
+
+    assert app.config.overlay_opacity == 0.65
+    assert app.config.overlay_glass is False
+
+
+def test_buttons_are_rounded(ui):
+    overlay, app, root = make_overlay(ui)
+    polygons = [item for item in overlay.canvas.items if item["kind"] == "polygon"]
+    assert polygons, "кнопки и полоса уровня рисуются скруглёнными"

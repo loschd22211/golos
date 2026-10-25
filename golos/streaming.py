@@ -106,6 +106,9 @@ class StreamingDictator:
         self._fatal = False
         self._last_chunk = ""
         self._same_chunk = 0
+        begin = getattr(self.transcriber, "begin_session", None)
+        if callable(begin):  # язык «auto» фиксируется один раз на сеанс
+            begin()
         self._thread = threading.Thread(target=self._run, name="golos-stream", daemon=True)
         self._thread.start()
         log.info(

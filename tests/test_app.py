@@ -367,3 +367,55 @@ def test_stop_cancels_active_recording(tmp_path):
     app.stop()
     assert recorder.cancelled == 1
     assert app.hotkeys.registered == {}
+
+
+# ------------------------------------------- закрепление окна-получателя (1.4)
+class FakeTracker:
+    def __init__(self):
+        self.pins = 0
+        self.unpins = 0
+
+    def pin(self):
+        self.pins += 1
+        return 222
+
+    def unpin(self):
+        self.unpins += 1
+
+
+def test_target_window_is_pinned_while_recording(tmp_path):
+    """Куда поставили курсор — туда и пишем, даже если переключили окно."""
+    app = make_app(tmp_path)
+    app.tracker = FakeTracker()
+
+    app.toggle()
+    assert app.tracker.pins == 1
+    assert app.tracker.unpins == 0, "пока идёт диктовка, цель не отпускаем"
+
+    app.stop_recording()
+    time.sleep(0.05)
+    assert app.tracker.unpins == 1
+
+
+def test_pin_is_released_on_cancel(tmp_path):
+    app = make_app(tmp_path)
+    app.tracker = FakeTracker()
+
+    app.toggle()
+    app.cancel_recording()
+    assert app.tracker.unpins == 1
+
+
+def test_pin_errors_do_not_break_recording(tmp_path):
+    class Broken:
+        def pin(self):
+            raise RuntimeError("нет WinAPI")
+
+        def unpin(self):
+            raise RuntimeError("нет WinAPI")
+
+    app = make_app(tmp_path)
+    app.tracker = Broken()
+    app.toggle()          # не должно быть исключения из-за закрепления
+    assert app.is_recording is True
+    app.stop_recording()  # и снятие закрепления тоже не падает

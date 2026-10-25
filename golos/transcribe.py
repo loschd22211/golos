@@ -45,6 +45,7 @@ class WhisperTranscriber:
         self.active_device = ""      # на чём реально работаем: cpu / cuda
         self.active_compute = ""
         self.fallback_reason = ""    # почему не взлетела видеокарта
+        self._session_language = ""  # язык, зафиксированный на текущий сеанс
         self._lock = threading.RLock()
         self._load_lock = threading.Lock()
 
@@ -59,6 +60,20 @@ class WhisperTranscriber:
 
     def set_config(self, config: Config) -> None:
         self.config = config
+
+    def begin_session(self) -> None:
+        """Начать новый сеанс диктовки.
+
+        При ``language="auto"`` язык определяется один раз на сеанс и дальше не
+        переключается: на кусках по 0.35–1 с автоопределение скакало между
+        русским и английским, и половина текста выходила «Fiking», «Thank you».
+        """
+        self._session_language = ""
+
+    def _resolve_language(self, cfg: Config) -> str | None:
+        if cfg.language != "auto":
+            return cfg.language
+        return self._session_language or None
 
     def is_model_downloaded(self, model: str | None = None) -> bool:
         """Есть ли модель локально (чтобы предупредить о скачивании)."""
@@ -178,7 +193,8 @@ class WhisperTranscriber:
             return []
 
         model = self._ensure_model()
-        language = None if cfg.language == "auto" else cfg.language
+        duration = float(getattr(audio, "size", 0)) / float(cfg.sample_rate or 16000)
+        language = self._resolve_language(cfg)
         params = {
             "task": "transcribe",
             "language": language,
@@ -202,7 +218,8 @@ class WhisperTranscriber:
         }
 
         with self._lock:
-            pieces, _info = model.transcribe(audio, **params)
+            pieces, info = model.transcribe(audio, **params)
+            self._lock_session_language(cfg, info, duration)
             result = []
             for segment in pieces:
                 piece = (segment.text or "").strip()
@@ -233,6 +250,19 @@ class WhisperTranscriber:
                 )
         return result
 
+    def _lock_session_language(self, cfg: Config, info, duration: float) -> None:
+        """Запомнить язык сеанса, если он определился уверенно."""
+        if cfg.language != "auto" or self._session_language:
+            return
+        detected = (getattr(info, "language", "") or "").strip()
+        try:
+            probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+        except (TypeError, ValueError):  # pragma: no cover
+            probability = 0.0
+        if detected and duration >= 2.0 and probability >= 0.7:
+            self._session_language = detected
+            log.info("Язык сеанса: %s (%.2f)", detected, probability)
+
     # -------------------------------------------------------------- transcribe
     def transcribe(self, audio, config: Config | None = None) -> TranscriptionResult:
         cfg = config or self.config
@@ -244,7 +274,7 @@ class WhisperTranscriber:
         started = time.monotonic()
         model = self._ensure_model()
 
-        language = None if cfg.language == "auto" else cfg.language
+        language = self._resolve_language(cfg)
         params = {
             "task": "transcribe",
             "language": language,

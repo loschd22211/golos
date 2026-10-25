@@ -20,12 +20,13 @@ from .audio import AudioError, list_input_devices
 from .config import Config
 from .hotkeys import pretty_hotkey
 from .system import open_path
-from . import winfocus
+from . import glass, winfocus
 
 log = logging.getLogger(__name__)
 
 WIDTH = 348
 HEIGHT = 96
+PANEL_RADIUS = 22          # радиус скругления плашки
 
 # Геометрия кнопок — один источник правды: по этим прямоугольникам и рисуем,
 # и ловим клики. Раньше крестик рисовался вверху справа, а клик искали внизу
@@ -56,6 +57,7 @@ BUTTON_TITLES = {
 }
 
 BG = "#141922"
+SURFACE = "#1c2333"
 BORDER = "#2b3342"
 TEXT = "#e9eef8"
 MUTED = "#8b96ab"
@@ -91,12 +93,32 @@ MODEL_LABELS = {
     "medium": "medium — точнее, медленнее",
     "large-v3": "large-v3 — максимум (нужен GPU)",
 }
-LANGS = {"auto": "Авто (рус + eng)", "ru": "Русский", "en": "English"}
+LANGS = {"ru": "Русский", "auto": "Авто (рус + eng)", "en": "English"}
+GLASS_LEVELS = {
+    "Непрозрачная": 1.0,
+    "Стекло 93%": 0.93,
+    "Легче 80%": 0.8,
+    "Совсем лёгкая 65%": 0.65,
+}
 METHODS = {"paste": "Буфер + Ctrl+V", "type": "Посимвольно"}
 
 
 def _font(size: int, bold: bool = False):
     return (FONT, size, "bold") if bold else (FONT, size)
+
+
+def _round_rect(canvas, x0, y0, x1, y1, radius, **kwargs):
+    """Прямоугольник со скруглёнными углами (canvas не умеет их сам)."""
+    radius = max(0, min(radius, (x1 - x0) // 2, (y1 - y0) // 2))
+    points = [
+        x0 + radius, y0, x1 - radius, y0,
+        x1, y0, x1, y0 + radius,
+        x1, y1 - radius, x1, y1,
+        x1 - radius, y1, x0 + radius, y1,
+        x0, y1, x0, y1 - radius,
+        x0, y0 + radius, x0, y0,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kwargs)
 
 
 def _short(text: str, limit: int = 38) -> str:
@@ -128,6 +150,7 @@ class Overlay:
         self._pressed = ""     # какая кнопка нажата
         self._pulse = 0
         self._drag = None
+        self._panel_photo = None
 
         self._setup_window()
         self._draw()
@@ -141,7 +164,6 @@ class Overlay:
         root.configure(bg=BG)
         try:
             root.attributes("-topmost", True)
-            root.attributes("-alpha", 0.97)
         except tk.TclError:  # pragma: no cover
             pass
 
@@ -168,6 +190,37 @@ class Overlay:
         if not winfocus.make_no_activate(root):
             log.debug("WS_EX_NOACTIVATE недоступен — клик может забирать фокус")
         winfocus.keep_on_top(root, True)
+        self.apply_look()
+
+    # -------------------------------------------------------------------- вид
+    def apply_look(self) -> None:
+        """Применить «стекло»: прозрачность, скруглённые углы, размытие фона."""
+        cfg = self.app.config
+        try:
+            opacity = float(getattr(cfg, "overlay_opacity", 0.93) or 0.93)
+        except (TypeError, ValueError):  # pragma: no cover
+            opacity = 0.93
+        blur = bool(getattr(cfg, "overlay_glass", True))
+        try:
+            glass.apply_glass(self.root, radius=PANEL_RADIUS, opacity=opacity, blur=blur)
+        except Exception as exc:  # pragma: no cover - экзотическая система
+            log.debug("Стекло недоступно: %s", exc)
+        self._build_panel()
+        self._draw()
+
+    def _build_panel(self) -> None:
+        """Собрать картинку панели (градиент, блик, рамка) один раз."""
+        self._panel_photo = None
+        image = glass.panel_image(WIDTH, HEIGHT, radius=PANEL_RADIUS)
+        if image is None:
+            return
+        try:
+            from PIL import ImageTk
+
+            self._panel_photo = ImageTk.PhotoImage(image, master=self.root)
+        except Exception as exc:  # pragma: no cover - нет Pillow/ImageTk
+            log.debug("Картинка панели недоступна: %s", exc)
+            self._panel_photo = None
 
     def _place_default(self) -> None:
         try:
@@ -185,18 +238,22 @@ class Overlay:
         c.delete("all")
         color = STATE_COLORS.get(self.state, ACCENT)
 
-        c.create_rectangle(0, 0, WIDTH, HEIGHT, fill=BG, outline="")
-        c.create_rectangle(0, 0, WIDTH, 2, fill=color, outline="")
+        if self._panel_photo is not None:
+            # Панель «матовое стекло»: градиент, блик и светлая рамка.
+            c.create_image(0, 0, anchor="nw", image=self._panel_photo)
+        else:  # pragma: no cover - без Pillow
+            c.create_rectangle(0, 0, WIDTH, HEIGHT, fill=BG, outline="")
+        c.create_rectangle(PANEL_RADIUS, 0, WIDTH - PANEL_RADIUS, 2, fill=color, outline="")
 
         # кнопка микрофона
         cx, cy, r = 46, HEIGHT // 2, 26
         if self.state == RECORDING:
-            c.create_oval(cx - r - 6, cy - r - 6, cx + r + 6, cy + r + 6, fill="#2a1a1e", outline="")
+            c.create_oval(cx - r - 6, cy - r - 6, cx + r + 6, cy + r + 6, fill="#3a1d22", outline="")
             pulse = 2 + (self._pulse % 6)
             ring = r + 4 + pulse
             c.create_oval(cx - ring, cy - ring, cx + ring, cy + ring, outline=RED, width=1)
         else:
-            c.create_oval(cx - r - 6, cy - r - 6, cx + r + 6, cy + r + 6, fill="#1c2333", outline="")
+            c.create_oval(cx - r - 6, cy - r - 6, cx + r + 6, cy + r + 6, fill=SURFACE, outline="")
         fill = color if (self.state == RECORDING or self._hover) else ACCENT
         c.create_oval(cx - r, cy - r, cx + r, cy + r, fill=fill, outline="")
 
@@ -228,23 +285,24 @@ class Overlay:
 
         # индикатор уровня
         bar_x0, bar_x1, bar_y = 84, text_right, 72
-        c.create_rectangle(bar_x0, bar_y, bar_x1, bar_y + 4, fill="#232b39", outline="")
+        _round_rect(c, bar_x0, bar_y, bar_x1, bar_y + 4, 2, fill="#2a3346", outline="")
         if self.level > 0.01:
             width = max(3, int((bar_x1 - bar_x0) * min(1.0, self.level)))
             bar_color = GREEN if self.level < 0.6 else (AMBER if self.level < 0.85 else RED)
-            c.create_rectangle(bar_x0, bar_y, bar_x0 + width, bar_y + 4, fill=bar_color, outline="")
+            _round_rect(c, bar_x0, bar_y, bar_x0 + width, bar_y + 4, 2,
+                        fill=bar_color, outline="")
 
         # кнопки справа: стоп (во время записи), настройки, закрыть.
         # Рисуем ровно в тех же прямоугольниках, по которым ловим клики.
         for name, (x0, y0, x1, y1) in self._buttons().items():
             hovered = self._hover == name
             pressed = self._pressed == name
-            fill = "#243044" if hovered or pressed else "#1c2333"
+            fill = "#2a3a52" if hovered or pressed else SURFACE
             if pressed:
-                fill = "#2f3d55"
+                fill = "#364a68"
             if name == "stop":
-                fill = "#3a1a1e" if not hovered else "#4a2226"
-            c.create_rectangle(x0, y0, x1, y1, fill=fill, outline="")
+                fill = "#3a1d22" if not hovered else "#4a2529"
+            _round_rect(c, x0, y0, x1, y1, 9, fill=fill, outline="")
             glyph_color = WHITE if hovered or pressed else MUTED
             if name == "stop":
                 glyph_color = "#ffb3b6" if not hovered else WHITE
@@ -384,6 +442,8 @@ class Overlay:
             # иначе клик по плашке уводит фокус и Ctrl+V пропадает.
             winfocus.make_no_activate(self.root)
             winfocus.keep_on_top(self.root, True)
+            # Окно могли пересоздать — стекло и скругление ставим заново.
+            self.apply_look()
         except tk.TclError:  # pragma: no cover
             pass
 
@@ -454,7 +514,7 @@ class SettingsDialog:
         self.win = tk.Toplevel(parent)
         self.win.title(f"{APP_TITLE} — настройки")
         self.win.configure(bg=BG)
-        self.win.geometry("460x420")
+        self.win.geometry("460x470")
         self.win.resizable(False, False)
         try:
             winfocus.clear_no_activate(self.win)
@@ -469,6 +529,11 @@ class SettingsDialog:
         self.autostart = tk.BooleanVar(value=cfg.autostart)
         self.admin_rights = tk.BooleanVar(value=getattr(cfg, "run_as_admin", True))
         self.sound = tk.BooleanVar(value=cfg.sound_feedback)
+        self.glass = tk.BooleanVar(value=bool(getattr(cfg, "overlay_glass", True)))
+        opacity = float(getattr(cfg, "overlay_opacity", 0.93) or 0.93)
+        self.opacity = tk.StringVar(
+            value=min(GLASS_LEVELS, key=lambda name: abs(GLASS_LEVELS[name] - opacity))
+        )
 
         self._build()
 
@@ -511,6 +576,28 @@ class SettingsDialog:
                 command=self.apply,
             ).grid(row=5, column=index, sticky="w", padx=14, pady=4)
 
+        tk.Label(form, text="Прозрачность", bg=BG, fg=MUTED, font=_font(9)).grid(
+            row=6, column=0, sticky="w", **pad
+        )
+        opacity = ttk.Combobox(
+            form, textvariable=self.opacity, values=list(GLASS_LEVELS), state="readonly"
+        )
+        opacity.grid(row=6, column=1, sticky="ew", **pad)
+        opacity.bind("<<ComboboxSelected>>", lambda _e: self.apply())
+
+        tk.Checkbutton(
+            form,
+            text="Размытие фона (эффект стекла, Windows 10/11)",
+            variable=self.glass,
+            bg=BG,
+            fg=TEXT,
+            selectcolor="#1c2333",
+            activebackground=BG,
+            activeforeground=TEXT,
+            font=_font(9),
+            command=self.apply,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=14, pady=4)
+
         # Без прав администратора Windows не пускает текст в админские окна.
         tk.Checkbutton(
             form,
@@ -523,7 +610,7 @@ class SettingsDialog:
             activeforeground=TEXT,
             font=_font(9),
             command=self.apply,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=14, pady=4)
+        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=14, pady=4)
 
         buttons = tk.Frame(self.win, bg=BG)
         buttons.pack(fill="x", padx=14, pady=12)
@@ -549,6 +636,8 @@ class SettingsDialog:
         cfg.autostart = bool(self.autostart.get())
         cfg.sound_feedback = bool(self.sound.get())
         cfg.run_as_admin = bool(self.admin_rights.get())
+        cfg.overlay_glass = bool(self.glass.get())
+        cfg.overlay_opacity = GLASS_LEVELS.get(self.opacity.get(), cfg.overlay_opacity)
         cfg.normalize()
         return cfg
 
@@ -559,6 +648,11 @@ class SettingsDialog:
             log.warning("Настройки не прочитаны: %s", exc)
             return
         warnings = self.app.apply_config(cfg)
+        try:
+            # Стекло применяем сразу, без перезапуска.
+            self.overlay.apply_look()
+        except Exception as exc:  # pragma: no cover
+            log.debug("Вид плашки не обновился: %s", exc)
         if warnings:
             messagebox.showwarning(APP_TITLE, "\n".join(warnings), parent=self.win)
 
