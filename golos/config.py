@@ -1,0 +1,230 @@
+"""Настройки приложения и пути к пользовательским данным."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
+from typing import Any
+
+from . import APP_NAME
+
+# Модели Whisper (чем больше — тем точнее и медленнее).
+MODELS = ("tiny", "base", "small", "medium", "large-v3")
+MODEL_LABELS = {
+    "tiny": "tiny — очень быстро, низкая точность",
+    "base": "base — быстро, слабая точность",
+    "small": "small — быстрый баланс",
+    "medium": "medium — точнее, рекомендуется",
+    "large-v3": "large-v3 — максимум точности, нужен мощный ПК/GPU",
+}
+
+LANGUAGES = {
+    "auto": "Авто (русский + английский)",
+    "ru": "Только русский",
+    "en": "Только английский",
+}
+
+INSERT_METHODS = {
+    "paste": "Вставка через буфер обмена (быстро)",
+    "type": "Печать посимвольно (буква за буквой)",
+}
+
+DEVICES = ("auto", "cpu", "cuda")
+COMPUTE_TYPES = ("auto", "int8", "int8_float16", "float16", "float32")
+
+# Промпт по умолчанию: подсказывает модели смешанную русско-английскую лексику,
+# чтобы английские слова не переводились и не переписывались кириллицей.
+DEFAULT_INITIAL_PROMPT = (
+    "Смешанная русская и английская речь. Пример: «Открой GitHub, запусти Docker "
+    "и проверь Python-скрипт, потом сделай commit и push в репозиторий». "
+    "Английские слова записываются латиницей, русские — кириллицей."
+)
+
+
+@dataclass
+class AppPaths:
+    """Куда складывать конфиг, логи, историю и модели."""
+
+    data_dir: Path
+
+    @classmethod
+    def default(cls) -> "AppPaths":
+        if sys.platform == "win32":
+            base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        elif sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support"
+        else:
+            base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        return cls(data_dir=base / APP_NAME)
+
+    @property
+    def config_file(self) -> Path:
+        return self.data_dir / "config.json"
+
+    @property
+    def log_file(self) -> Path:
+        return self.data_dir / "golos.log"
+
+    @property
+    def history_file(self) -> Path:
+        return self.data_dir / "history.txt"
+
+    @property
+    def models_dir(self) -> Path:
+        return self.data_dir / "models"
+
+    def ensure(self) -> "AppPaths":
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        return self
+
+
+@dataclass
+class Config:
+    """Пользовательские настройки. Все значения сериализуются в JSON."""
+
+    # --- горячие клавиши ---
+    hotkey: str = "ctrl+alt+space"
+    cancel_hotkey: str = "esc"
+
+    # --- распознавание ---
+    model: str = "medium"
+    device: str = "auto"
+    compute_type: str = "auto"
+    language: str = "auto"
+    beam_size: int = 5
+    vad_filter: bool = True
+    condition_on_previous_text: bool = False
+    initial_prompt: str = DEFAULT_INITIAL_PROMPT
+    hotwords: str = ""
+    replacements: list = field(default_factory=list)  # [["питон", "Python"], ...]
+
+    # --- микрофон ---
+    input_device: str = ""  # "" = системный по умолчанию, либо часть названия/индекс
+    sample_rate: int = 16000
+    trim_silence: bool = True
+    min_duration: float = 0.35
+
+    # --- вставка текста ---
+    insert_method: str = "paste"
+    restore_clipboard: bool = True
+    paste_delay: float = 0.15
+    trailing_space: bool = True
+    capitalize: bool = True
+    remove_fillers: bool = False
+
+    # --- интерфейс / прочее ---
+    sound_feedback: bool = True
+    notifications: bool = True
+    autostart: bool = False
+    preload_model: bool = True
+    history_enabled: bool = True
+    log_level: str = "INFO"
+
+    def __post_init__(self) -> None:
+        self.normalize()
+
+    # ------------------------------------------------------------------ utils
+    def normalize(self) -> None:
+        """Привести значения к допустимым (после ручной правки JSON)."""
+        self.model = _pick(self.model, MODELS, "medium")
+        self.device = _pick(self.device, DEVICES, "auto")
+        self.compute_type = _pick(self.compute_type, COMPUTE_TYPES, "auto")
+        self.language = _pick(self.language, tuple(LANGUAGES), "auto")
+        self.insert_method = _pick(self.insert_method, tuple(INSERT_METHODS), "paste")
+
+        self.hotkey = str(self.hotkey or "").strip() or "ctrl+alt+space"
+        self.cancel_hotkey = str(self.cancel_hotkey or "").strip()
+        self.initial_prompt = str(self.initial_prompt or "")
+        self.hotwords = str(self.hotwords or "")
+        self.input_device = str(self.input_device or "").strip()
+
+        self.beam_size = _clamp_int(self.beam_size, 1, 10, 5)
+        self.sample_rate = _clamp_int(self.sample_rate, 8000, 48000, 16000)
+        self.min_duration = _clamp_float(self.min_duration, 0.1, 10.0, 0.35)
+        self.paste_delay = _clamp_float(self.paste_delay, 0.0, 2.0, 0.15)
+        self.replacements = _clean_replacements(self.replacements)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Config":
+        known = {f.name for f in fields(cls)}
+        kwargs: dict[str, Any] = {}
+        for key, value in (data or {}).items():
+            if key in known:
+                kwargs[key] = value
+        return cls(**kwargs)
+
+    def copy(self) -> "Config":
+        return Config.from_dict(self.to_dict())
+
+
+# ---------------------------------------------------------------------- files
+def load_config(path: Path | None = None) -> tuple[Config, Path | None]:
+    """Прочитать конфиг. Возвращает (config, путь_к_битому_файлу_или_None)."""
+    path = Path(path) if path else AppPaths.default().config_file
+    if not path.exists():
+        return Config(), None
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("корневой элемент должен быть объектом")
+        return Config.from_dict(raw), None
+    except (json.JSONDecodeError, ValueError, TypeError, OSError):
+        broken = path.with_name(f"config.broken-{time.strftime('%Y%m%d-%H%M%S')}.json")
+        try:
+            path.replace(broken)
+        except OSError:
+            broken = None  # type: ignore[assignment]
+        return Config(), broken
+
+
+def save_config(config: Config, path: Path | None = None) -> Path:
+    path = Path(path) if path else AppPaths.default().config_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(config.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    return path
+
+
+# -------------------------------------------------------------------- helpers
+def _pick(value: Any, allowed: tuple[str, ...], fallback: str) -> str:
+    value = str(value or "").strip().lower()
+    return value if value in allowed else fallback
+
+
+def _clamp_int(value: Any, low: int, high: int, fallback: int) -> int:
+    try:
+        return max(low, min(high, int(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _clamp_float(value: Any, low: float, high: float, fallback: float) -> float:
+    try:
+        return max(low, min(high, float(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _clean_replacements(value: Any) -> list[list[str]]:
+    result: list[list[str]] = []
+    if not isinstance(value, (list, tuple)):
+        return result
+    for item in value:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            src, dst = str(item[0]), str(item[1])
+            if src:
+                result.append([src, dst])
+    return result
