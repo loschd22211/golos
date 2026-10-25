@@ -300,6 +300,18 @@ class DictationApp:
         except OSError as exc:  # pragma: no cover
             log.debug("История недоступна: %s", exc)
 
+    def insert_last(self) -> bool:
+        """Вставить последний распознанный текст ещё раз."""
+        text = (self.last_text or "").strip()
+        if not text:
+            return False
+        try:
+            self.injector.insert(text + (" " if self.config.trailing_space else ""))
+            return True
+        except InjectionError as exc:
+            self._fail(str(exc))
+            return False
+
     # ------------------------------------------------------------------ preload
     def preload_async(self) -> None:
         if self._preload_thread and self._preload_thread.is_alive():

@@ -137,3 +137,41 @@ def normalize_hotkey(combination: str) -> str:
     parts = [p.strip().lower() for p in (combination or "").split("+") if p.strip()]
     parts = [_ALIASES.get(p, p) for p in parts]
     return "+".join(parts)
+
+
+_PRETTY = {
+    "ctrl": "Ctrl",
+    "alt": "Alt",
+    "shift": "Shift",
+    "windows": "Win",
+    "escape": "Esc",
+    "enter": "Enter",
+    "space": "Space",
+    "tab": "Tab",
+    "backspace": "Backspace",
+    "delete": "Del",
+    "insert": "Ins",
+    "page up": "PgUp",
+    "page down": "PgDn",
+    "home": "Home",
+    "end": "End",
+    "up": "↑",
+    "down": "↓",
+    "left": "←",
+    "right": "→",
+}
+
+
+def pretty_hotkey(combination: str) -> str:
+    """«ctrl+alt+space» → «Ctrl+Alt+Space» для интерфейса."""
+    parts = [p.strip() for p in (combination or "").split("+") if p.strip()]
+    out: list[str] = []
+    for part in parts:
+        low = part.lower()
+        if low in _PRETTY:
+            out.append(_PRETTY[low])
+        elif len(part) == 1:
+            out.append(part.upper())
+        else:
+            out.append(part[:1].upper() + part[1:])
+    return "+".join(out)

@@ -39,8 +39,7 @@ class GuiBridge:
         self.root = root
         self.queue: "queue.Queue[tuple[str, tuple]]" = queue.Queue()
         self.tray = None
-        self.settings = None
-        self.on_notify_fallback = None
+        self.window = None
 
     # ------------------------------------------------------------------ helpers
     def post(self, func, *args) -> None:
@@ -69,21 +68,21 @@ class GuiBridge:
             state, message = payload
             if self.tray:
                 self.tray.update_state(state, message)
-            if self.settings and self.settings.is_visible():
-                self.settings.update_status(state, message)
+            if self.window:
+                self.window.update_state(state, message)
         elif kind == "level":
             if self.tray:
                 self.tray.update_level(payload[0])
+            if self.window and self.window.is_visible():
+                self.window.update_level(payload[0])
         elif kind == "text":
             text, _raw = payload
-            if self.settings and self.settings.is_visible():
-                self.settings.update_status("Готов", "Вставлено")
+            if self.window:
+                self.window.set_last_text(text)
         elif kind == "error":
             message = payload[0]
             if self.tray:
                 self.tray.notify("Голос — ошибка", message[:220])
-            if self.settings and self.settings.is_visible():
-                self.settings.update_status("Ошибка", message[:120])
         elif kind == "notify":
             title, message = payload
             if self.tray:
@@ -129,7 +128,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         prog="golos",
         description="Офлайн-диктовка: говорите — текст появляется в любом поле ввода.",
     )
-    parser.add_argument("--settings", action="store_true", help="сразу открыть настройки")
+    parser.add_argument("--show", "--settings", dest="show", action="store_true",
+                        help="сразу открыть окно программы")
     parser.add_argument("--silent", action="store_true", help="не показывать консоль/логи в окне")
     parser.add_argument("--no-tray", action="store_true", help="не создавать иконку в трее")
     parser.add_argument("--no-gui", action="store_true", help="полностью без интерфейса")
@@ -209,18 +209,17 @@ def _run_console(app: DictationApp, single: SingleInstance) -> int:
 def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance) -> int:
     import tkinter as tk
 
-    from golos.settings_window import SettingsWindow
     from golos.tray import create_tray
+    from golos.ui import MainWindow
 
     root = tk.Tk()
     root.withdraw()
-    root.title(APP_TITLE)
 
     bridge = GuiBridge(root)
     app.ui = bridge
 
-    settings = SettingsWindow(root, app)
-    bridge.settings = settings
+    window = MainWindow(root, app)
+    bridge.window = window
 
     def quit_app() -> None:
         log.info("Завершение по команде пользователя")
@@ -240,7 +239,7 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
 
     tray = create_tray(
         app,
-        on_settings=lambda: bridge.post(settings.show),
+        on_open=lambda: bridge.post(window.show),
         on_quit=quit_app,
         on_history=lambda: bridge.post(lambda: open_path(app.paths.history_file)),
         on_show_log=lambda: bridge.post(lambda: open_path(app.paths.log_file)),
@@ -253,15 +252,14 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
         root.after(70, poll_events)
 
     root.after(70, poll_events)
-    root.protocol("WM_DELETE_WINDOW", quit_app)
 
     app.start()
     tray.start()
 
     first_run = not app.transcriber.is_model_downloaded()
-    if args.settings or first_run:
-        # Первый запуск: модель ещё не скачана — покажем настройки и подсказку.
-        root.after(400, settings.show)
+    if args.show or first_run:
+        # Первый запуск: показываем окно, чтобы человек понял, что происходит.
+        root.after(300, window.show)
         if first_run:
             log.info("Модель ещё не скачана — она загрузится при первом распознавании")
 

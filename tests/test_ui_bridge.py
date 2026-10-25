@@ -31,30 +31,34 @@ class FakeTray:
         self.notifications.append((title, message))
 
 
-class FakeSettings:
+class FakeWindow:
     def __init__(self, visible=True):
         self.visible = visible
-        self.statuses = []
-        self.refreshes = 0
+        self.states = []
+        self.levels = []
+        self.texts = []
 
     def is_visible(self):
         return self.visible
 
-    def update_status(self, state, message=""):
-        self.statuses.append((state, message))
+    def update_state(self, state, message=""):
+        self.states.append((state, message))
 
-    def _refresh_stats(self):
-        self.refreshes += 1
+    def update_level(self, level):
+        self.levels.append(level)
+
+    def set_last_text(self, text):
+        self.texts.append(text)
 
 
 def make_bridge():
     bridge = golos_app.GuiBridge(FakeRoot())
     bridge.tray = FakeTray()
-    bridge.settings = FakeSettings()
+    bridge.window = FakeWindow()
     return bridge
 
 
-def test_events_reach_tray_and_settings():
+def test_events_reach_tray_and_window():
     bridge = make_bridge()
 
     bridge.on_state(RECORDING, "Слушаю…")
@@ -68,24 +72,28 @@ def test_events_reach_tray_and_settings():
     assert bridge.tray.levels == [0.4]
     assert ("Голос — ошибка", "нет доступа") in bridge.tray.notifications
     assert ("Голос", "готово") in bridge.tray.notifications
-    assert any("Вставлено" in s[1] for s in bridge.settings.statuses)
-    assert any(s[0] == "Ошибка" for s in bridge.settings.statuses)
+    assert bridge.window.states == [(RECORDING, "Слушаю…")]
+    assert bridge.window.levels == [0.4]
+    assert bridge.window.texts == ["Привет "]
 
 
-def test_hidden_settings_not_updated():
+def test_hidden_window_skips_level_updates():
     bridge = make_bridge()
-    bridge.settings.visible = False
+    bridge.window.visible = False
     bridge.on_state(IDLE, "Готов")
+    bridge.on_level(0.3)
     bridge.on_text("x")
     bridge.pump()
-    assert bridge.settings.statuses == []
+    assert bridge.window.states == [(IDLE, "Готов")]
+    assert bridge.window.levels == []
+    assert bridge.window.texts == ["x"]
     assert bridge.tray.states == [(IDLE, "Готов")]
 
 
 def test_no_tray_does_not_crash():
     bridge = golos_app.GuiBridge(FakeRoot())
     bridge.tray = None
-    bridge.settings = None
+    bridge.window = None
     bridge.on_state(ERROR, "ошибка")
     bridge.on_level(0.1)
     bridge.on_notify("Голос", "текст")
@@ -119,16 +127,20 @@ def test_console_bridge_output(capsys):
 
 def test_parse_args_defaults():
     args = golos_app.parse_args([])
-    assert args.settings is False
+    assert args.show is False
     assert args.no_gui is False
     assert args.silent is False
     assert args.no_preload is False
 
 
 def test_parse_args_flags():
-    args = golos_app.parse_args(["--settings", "--debug", "--no-gui", "--config", "x.json"])
-    assert args.settings and args.debug and args.no_gui
+    args = golos_app.parse_args(["--show", "--debug", "--no-gui", "--config", "x.json"])
+    assert args.show and args.debug and args.no_gui
     assert args.config == "x.json"
+
+
+def test_old_settings_flag_still_works():
+    assert golos_app.parse_args(["--settings"]).show is True
 
 
 # ---------------------------------------------------------------- иконки трея

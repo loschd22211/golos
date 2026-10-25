@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from .hotkeys import pretty_hotkey
 from .app import ERROR, IDLE, LOADING, PAUSED, RECORDING, STATE_LABELS, DictationApp
 
 log = logging.getLogger(__name__)
@@ -102,6 +103,7 @@ class TrayIcon(NullTray):
     def __init__(
         self,
         app: DictationApp,
+        on_open=None,
         on_settings=None,
         on_quit=None,
         on_history=None,
@@ -112,7 +114,8 @@ class TrayIcon(NullTray):
 
         self._pystray = pystray
         self.app = app
-        self.on_settings = on_settings or (lambda: None)
+        self.on_open = on_open or on_settings or (lambda: None)
+        self.on_settings = self.on_open
         self.on_quit = on_quit or (lambda: None)
         self.on_history = on_history or (lambda: None)
         self.on_show_log = on_show_log or (lambda: None)
@@ -137,14 +140,13 @@ class TrayIcon(NullTray):
         Menu, MenuItem = pystray.Menu, pystray.MenuItem
 
         return Menu(
+            MenuItem("Открыть «Голос»", self._menu_open, default=True),
             MenuItem(
                 lambda item: "Остановить запись" if self.app.is_recording else "Начать запись",
                 self._menu_toggle,
-                default=True,
             ),
             MenuItem(self._pause_label, self._menu_pause),
             Menu.SEPARATOR,
-            MenuItem("Настройки…", self._menu_settings),
             MenuItem("Открыть историю", self._menu_history),
             MenuItem("Открыть журнал", self._menu_log),
             MenuItem("Папка настроек", self._menu_folder),
@@ -155,6 +157,9 @@ class TrayIcon(NullTray):
     def _pause_label(self, item) -> str:
         return "Продолжить работу" if self.app.paused else "Пауза"
 
+    def _menu_open(self, icon, item) -> None:
+        self.on_open()
+
     def _menu_toggle(self, icon, item) -> None:
         self.app.toggle()
 
@@ -162,8 +167,6 @@ class TrayIcon(NullTray):
         self.app.pause()
         self.update_menu()
 
-    def _menu_settings(self, icon, item) -> None:
-        self.on_settings()
 
     def _menu_history(self, icon, item) -> None:
         self.on_history()
@@ -202,7 +205,7 @@ class TrayIcon(NullTray):
     def _tooltip(self) -> str:
         cfg = self.app.config
         label = STATE_LABELS.get(self.state, self.state)
-        hint = f"Голос — {label}\n{cfg.hotkey}: начать/остановить запись"
+        hint = f"Голос — {label}\n{pretty_hotkey(cfg.hotkey)}: начать/остановить запись"
         if self._message and self._message not in (label,):
             hint += f"\n{self._message}"
         return hint[:120]
