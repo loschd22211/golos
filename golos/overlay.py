@@ -94,6 +94,7 @@ class Overlay:
         self.state = IDLE
         self.level = 0.0
         self.partial = ""
+        self.last = ""
         self.error = ""
         self._hover = False
         self._pulse = 0
@@ -190,6 +191,8 @@ class Overlay:
         hint = f"{pretty_hotkey(self.app.config.hotkey)} · {self.state}" if self.state != ERROR else "нажмите журнал"
         if self.partial and self.state == RECORDING:
             hint = f"слушаю… {self.app.config.model}"
+        elif self.last and self.state != ERROR:
+            hint = f"вставлено: {_tail(self.last, 30)}"
         c.create_text(84, 52, anchor="w", text=_short(hint, 34), fill=MUTED, font=_font(8))
 
         # индикатор уровня
@@ -332,6 +335,8 @@ class Overlay:
         self._draw()
 
     def set_last(self, text: str) -> None:
+        """Показать последний вставленный кусок — видно, что текст реально ушёл."""
+        self.last = (text or "").strip()
         self.partial = ""
         self._draw()
 

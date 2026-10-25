@@ -150,6 +150,7 @@ class WhisperTranscriber:
         config: Config | None = None,
         initial_prompt: str | None = None,
         beam_size: int | None = None,
+        want_words: bool = True,
     ) -> list[dict]:
         """Распознать кусок аудио и вернуть сегменты с таймингами.
 
@@ -169,7 +170,9 @@ class WhisperTranscriber:
             "vad_filter": False,
             "condition_on_previous_text": False,
             "without_timestamps": False,
-            "word_timestamps": False,
+            # Тайминги по словам нужны, чтобы вставлять текст ровно по границе
+            # слова, а не резать его посреди «приве…».
+            "word_timestamps": bool(want_words),
             "initial_prompt": initial_prompt or cfg.initial_prompt or None,
             "hotwords": cfg.hotwords or None,
         }
@@ -181,11 +184,24 @@ class WhisperTranscriber:
                 piece = (segment.text or "").strip()
                 if not piece:
                     continue
+                words = []
+                for word in getattr(segment, "words", None) or []:
+                    text = (getattr(word, "word", "") or "").strip()
+                    if not text:
+                        continue
+                    words.append(
+                        {
+                            "word": text,
+                            "start": float(getattr(word, "start", 0.0) or 0.0),
+                            "end": float(getattr(word, "end", 0.0) or 0.0),
+                        }
+                    )
                 result.append(
                     {
                         "text": piece,
                         "start": float(getattr(segment, "start", 0.0) or 0.0),
                         "end": float(getattr(segment, "end", 0.0) or 0.0),
+                        "words": words,
                     }
                 )
         return result
