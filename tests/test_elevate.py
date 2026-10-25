@@ -187,7 +187,10 @@ def test_guard_blocks_when_target_is_admin(monkeypatch):
     monkeypatch.setattr(elevate, "_IS_WINDOWS", True)
     monkeypatch.setattr(elevate, "foreground_is_elevated", lambda: True)
     monkeypatch.setattr(elevate, "is_admin", lambda: False)
-    monkeypatch.setattr(elevate, "describe_foreground", lambda: "«Chrome» (chrome.exe, от администратора)")
+    monkeypatch.setattr(
+        elevate, "describe_window",
+        lambda hwnd=None: "«Chrome» (chrome.exe, от администратора)",
+    )
 
     with pytest.raises(InjectionError) as excinfo:
         elevate.insertion_guard()
@@ -201,7 +204,7 @@ def test_guard_allows_when_we_are_admin(monkeypatch):
     monkeypatch.setattr(elevate, "_IS_WINDOWS", True)
     monkeypatch.setattr(elevate, "foreground_is_elevated", lambda: True)
     monkeypatch.setattr(elevate, "is_admin", lambda: True)
-    monkeypatch.setattr(elevate, "describe_foreground", lambda: "«Chrome»")
+    monkeypatch.setattr(elevate, "describe_window", lambda hwnd=None: "«Chrome»")
 
     elevate.insertion_guard()  # не должно бросить
 
@@ -210,7 +213,9 @@ def test_guard_allows_regular_window(monkeypatch):
     monkeypatch.setattr(elevate, "_IS_WINDOWS", True)
     monkeypatch.setattr(elevate, "foreground_is_elevated", lambda: False)
     monkeypatch.setattr(elevate, "is_admin", lambda: False)
-    monkeypatch.setattr(elevate, "describe_foreground", lambda: "«Блокнот» (notepad.exe)")
+    monkeypatch.setattr(
+        elevate, "describe_window", lambda hwnd=None: "«Блокнот» (notepad.exe)"
+    )
 
     elevate.insertion_guard()
 
@@ -220,7 +225,7 @@ def test_guard_logs_target_window(monkeypatch, caplog):
     monkeypatch.setattr(elevate, "foreground_is_elevated", lambda: False)
     monkeypatch.setattr(elevate, "is_admin", lambda: False)
     monkeypatch.setattr(
-        elevate, "describe_foreground", lambda: "«Заметки» (notepad.exe)"
+        elevate, "describe_window", lambda hwnd=None: "«Заметки» (notepad.exe)"
     )
 
     with caplog.at_level("INFO", logger="golos.elevate"):
@@ -359,3 +364,38 @@ def test_app_sets_guard_on_injector(monkeypatch):
     monkeypatch.setattr(elevate, "is_admin", lambda: False)
     app = DictationApp(config=Config(), paths=AppPaths.default(), preload=False)
     assert app.injector.guard is elevate.insertion_guard
+
+
+# ------------------------------------------------ права проверяем у окна-цели
+def test_guard_checks_target_window(monkeypatch):
+    """Активным мог оказаться наш оверлей — смотреть надо на цель вставки."""
+    monkeypatch.setattr(elevate, "_IS_WINDOWS", True)
+    monkeypatch.setattr(elevate, "is_admin", lambda: False)
+    monkeypatch.setattr(elevate, "window_is_elevated", lambda hwnd: hwnd == 777)
+    monkeypatch.setattr(
+        elevate, "describe_window", lambda hwnd=None: f"«Chrome» ({hwnd})"
+    )
+
+    with pytest.raises(InjectionError):
+        elevate.insertion_guard(777)
+
+    elevate.insertion_guard(888)  # обычное окно — можно вставлять
+
+
+def test_guard_uses_foreground_without_target(monkeypatch):
+    monkeypatch.setattr(elevate, "_IS_WINDOWS", True)
+    monkeypatch.setattr(elevate, "is_admin", lambda: False)
+    monkeypatch.setattr(elevate, "foreground_is_elevated", lambda: True)
+    monkeypatch.setattr(elevate, "describe_window", lambda hwnd=None: "«Окно»")
+
+    with pytest.raises(InjectionError):
+        elevate.insertion_guard(None)
+
+
+def test_window_is_elevated_uses_window_pid(monkeypatch):
+    from golos import winfocus
+
+    monkeypatch.setattr(winfocus, "window_pid", lambda hwnd: 4242)
+    monkeypatch.setattr(elevate, "pid_is_elevated", lambda pid: pid == 4242)
+
+    assert elevate.window_is_elevated(10) is True

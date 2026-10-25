@@ -26,6 +26,9 @@ HWND_TOPMOST = -1
 SWP_NOMOVE = 0x0002
 SWP_NOSIZE = 0x0001
 SWP_NOACTIVATE = 0x0010
+SWP_NOZORDER = 0x0004
+SWP_FRAMECHANGED = 0x0020
+GA_ROOT = 2
 SW_RESTORE = 9
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -35,6 +38,12 @@ def _user32():
     import ctypes
 
     return ctypes.windll.user32
+
+
+def _kernel32():
+    import ctypes
+
+    return ctypes.windll.kernel32
 
 
 def get_foreground_window() -> int | None:
@@ -92,10 +101,19 @@ def set_extended_style(root, flags: int, remove: int = 0) -> bool:
             if not hwnd:
                 continue
             user32 = _user32()
-            user32.SetWindowLongW(
-                hwnd, GWL_EXSTYLE,
-                (user32.GetWindowLongW(hwnd, GWL_EXSTYLE) | flags) & ~remove,
-            )
+            # Стиль нужен и самому окну, и корневому: у Tk с overrideredirect
+            # настоящий HWND — родитель, иначе клик забирает фокус.
+            for target in {hwnd, root_window(hwnd) or hwnd}:
+                user32.SetWindowLongW(
+                    target, GWL_EXSTYLE,
+                    (user32.GetWindowLongW(target, GWL_EXSTYLE) | flags) & ~remove,
+                )
+                # Без SetWindowPos Windows не всегда применяет новый стиль.
+                user32.SetWindowPos(
+                    target, 0, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
+                    | SWP_NOACTIVATE,
+                )
             ok = True
         except Exception as exc:  # pragma: no cover
             log.debug("Стиль окна (%s) не применён: %s", getter, exc)
@@ -217,3 +235,184 @@ def foreground_info() -> dict | None:
         "title": window_title(hwnd),
         "exe": process_exe(pid),
     }
+
+
+def root_window(hwnd: int | None) -> int | None:
+    """Корневое окно (верхний уровень) для данного HWND."""
+    if not _IS_WINDOWS or not hwnd:  # pragma: no cover
+        return None
+    try:
+        root = _user32().GetAncestor(int(hwnd), GA_ROOT)
+        return int(root) if root else int(hwnd)
+    except Exception as exc:  # pragma: no cover
+        log.debug("GetAncestor не сработал: %s", exc)
+        return None
+
+
+def is_window(hwnd: int | None) -> bool:
+    """Существует ли ещё такое окно (пользователь мог его закрыть)."""
+    if not _IS_WINDOWS or not hwnd:  # pragma: no cover
+        return False
+    try:
+        return bool(_user32().IsWindow(int(hwnd)))
+    except Exception:  # pragma: no cover
+        return False
+
+
+def is_our_window(hwnd: int | None) -> bool:
+    """Окно принадлежит нам (оверлей, настройки, диалоги)?"""
+    pid = window_pid(hwnd)
+    if pid is None:  # pragma: no cover
+        return False
+    import os
+
+    return int(pid) == os.getpid()
+
+
+def force_foreground(hwnd: int | None) -> bool:
+    """Сделать окно активным, даже если фокус сейчас у нас в оверлее.
+
+    SetForegroundWindow сам по себе часто игнорируется, поэтому используем
+    общепринятый приём: AttachThreadInput к потоку активного окна и к потоку
+    нужного, BringWindowToTop + SetForegroundWindow + SetFocus, затем отцепка.
+    """
+    if not _IS_WINDOWS or not hwnd:  # pragma: no cover
+        return False
+    target = root_window(hwnd) or int(hwnd)
+    user32 = _user32()
+    try:
+        kernel32 = _kernel32()
+        current = int(kernel32.GetCurrentThreadId())
+        foreground = int(user32.GetForegroundWindow() or 0)
+        if foreground == target:
+            return True
+
+        target_thread = int(user32.GetWindowThreadProcessId(target, None) or 0)
+        foreground_thread = (
+            int(user32.GetWindowThreadProcessId(foreground, None) or 0)
+            if foreground
+            else 0
+        )
+
+        attached = []
+        for thread in (foreground_thread, target_thread):
+            if thread and thread != current:
+                if user32.AttachThreadInput(current, thread, True):
+                    attached.append(thread)
+        try:
+            user32.BringWindowToTop(target)
+            user32.ShowWindow(target, SW_RESTORE)
+            user32.SetForegroundWindow(target)
+            user32.SetFocus(target)
+        finally:
+            for thread in attached:
+                user32.AttachThreadInput(current, thread, False)
+
+        if int(user32.GetForegroundWindow() or 0) == target:
+            return True
+
+        # Запасной путь, которым пользуются многие диктовки: недокументированный,
+        # но работает там, где SetForegroundWindow молча отказывает.
+        try:
+            user32.SwitchToThisWindow(target, True)
+        except Exception:  # pragma: no cover
+            pass
+        return int(user32.GetForegroundWindow() or 0) == target
+    except Exception as exc:  # pragma: no cover
+        log.debug("Не удалось вернуть фокус окну %s: %s", hwnd, exc)
+        return False
+
+
+def activate_window(hwnd: int | None, attempts: int = 3, pause: float = 0.04) -> bool:
+    """Несколько попыток вернуть фокус: Windows иногда «проглатывает» первую."""
+    import time
+
+    if not hwnd:
+        return False
+    if not is_window(hwnd):
+        return False
+    for attempt in range(max(1, attempts)):
+        if force_foreground(hwnd):
+            return True
+        time.sleep(pause * (attempt + 1))
+    return False
+
+
+class TargetTracker:
+    """Помнит последнее чужое активное окно — туда и печатаем.
+
+    Без этого оверлей мог сам оказаться «активным окном» (клик по нему, меню
+    трея, диалог), и текст уходил в наше же окно: снаружи это выглядит как
+    «ничего не вставляется».
+    """
+
+    def __init__(self, interval: float = 0.15):
+        self.interval = interval
+        self._hwnd = 0
+        self._thread = None
+        self._stop = False
+
+    # ------------------------------------------------------------------ трекер
+    def start(self) -> None:
+        import threading
+
+        if self._thread is not None:
+            return
+        self.remember_current()
+        self._stop = False
+        self._thread = threading.Thread(
+            target=self._run, name="golos-target", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop = True
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            try:
+                thread.join(timeout=1.0)
+            except Exception:  # pragma: no cover
+                pass
+
+    def _run(self) -> None:
+        import time
+
+        while not self._stop:
+            try:
+                self.remember_current()
+            except Exception:  # pragma: no cover
+                pass
+            time.sleep(self.interval)
+
+    # ------------------------------------------------------------------- цель
+    def remember_current(self) -> bool:
+        return self.remember(get_foreground_window())
+
+    def remember(self, hwnd: int | None) -> bool:
+        """Запомнить окно, если оно чужое и живое."""
+        if not hwnd:
+            return False
+        if not is_window(hwnd):
+            return False
+        if is_our_window(hwnd):
+            return False
+        self._hwnd = int(hwnd)
+        return True
+
+    @property
+    def hwnd(self) -> int:
+        return self._hwnd
+
+    def activate(self) -> bool:
+        """Сделать запомненное окно активным перед вставкой."""
+        if not self._hwnd:
+            self.remember_current()
+        if not self._hwnd:
+            return False
+        if is_our_window(get_foreground_window()):
+            # Фокус у нас — обязательно уводим его в нужное окно.
+            ok = activate_window(self._hwnd)
+            if not ok:
+                log.warning("Не получилось вернуть фокус окну %s", self._hwnd)
+            return ok
+        return force_foreground(self._hwnd)

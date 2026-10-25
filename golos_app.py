@@ -288,6 +288,10 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
     def quit_app() -> None:
         log.info("Завершение по команде пользователя")
         try:
+            tracker.stop()
+        except Exception:  # pragma: no cover
+            pass
+        try:
             app.stop()
         finally:
             try:
@@ -313,26 +317,20 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
     )
     bridge.tray = tray
 
-    # Возврат фокуса тому окну, где стоял курсор, перед каждой вставкой.
-    target = {"hwnd": None}
-
-    def remember_target() -> None:
-        hwnd = winfocus.get_foreground_window()
-        if hwnd:
-            target["hwnd"] = hwnd
-
-    def restore_target() -> None:
-        if target["hwnd"]:
-            winfocus.restore_foreground_window(target["hwnd"])
-
-    app.focus_hook = restore_target
-    # Запоминаем активное окно в момент старта диктовки (клик по оверлею
-    # фокус не забирает, но подстрахуемся, если это всё же случилось).
+    # Куда печатать: запоминаем последнее чужое активное окно и возвращаем ему
+    # фокус перед каждой вставкой. Так текст не уедет в наш же оверлей.
+    tracker = winfocus.TargetTracker()
+    tracker.start()
+    app.tracker = tracker
+    app.focus_hook = tracker.activate
+    # Проверку прав делаем именно для окна-цели: активным мог оказаться оверлей.
+    app.injector.guard = lambda: elevate.insertion_guard(tracker.hwnd)
+    # В момент старта диктовки обновляем цель: пользователь мог переключиться.
     original_toggle = app.toggle
 
     def toggle_with_target() -> None:
         if not app.is_recording:
-            remember_target()
+            tracker.remember_current()
         original_toggle()
 
     app.toggle = toggle_with_target

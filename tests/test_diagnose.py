@@ -379,3 +379,33 @@ def test_run_with_progress_raises(capsys):
 
     with pytest.raises(RuntimeError, match="интернет"):
         diagnose._run_with_progress("модель", boom)
+
+
+def test_target_window_check_outside_windows(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "platform", "linux")
+    diagnose.warnings.clear()
+    diagnose.check_target_window()
+    out = capsys.readouterr().out
+    assert "только для Windows" in out
+    assert diagnose.warnings
+
+
+def test_target_window_check_reports_target(monkeypatch, capsys):
+    from golos import winfocus
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(winfocus.TargetTracker, "remember_current", lambda self: True)
+    monkeypatch.setattr(winfocus.TargetTracker, "hwnd", property(lambda self: 4242))
+    monkeypatch.setattr(winfocus, "get_foreground_window", lambda: 4242)
+    monkeypatch.setattr(winfocus, "is_our_window", lambda hwnd: False)
+
+    from golos import elevate
+
+    monkeypatch.setattr(
+        elevate, "describe_window", lambda hwnd=None: "«Chrome» (chrome.exe)"
+    )
+
+    diagnose.check_target_window()
+    out = capsys.readouterr().out
+    assert "цель вставки" in out
+    assert "окно-получатель определено" in out
