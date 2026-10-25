@@ -257,3 +257,30 @@ def test_code_version_reads_git(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "ветка: main" in out
     assert "код отстаёт от main" in out
+
+
+def test_fix_enables_streaming_and_lighter_model(monkeypatch, tmp_path, capsys):
+    appdata = tmp_path / "appdata" / "Golos"
+    appdata.mkdir(parents=True)
+    (appdata / "config.json").write_text(
+        json.dumps({"streaming": False, "model": "large-v3"}), encoding="utf-8"
+    )
+
+    diagnose.fix_config(appdata, cuda_ok=False)
+    capsys.readouterr()
+
+    data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
+    assert data["streaming"] is True
+    assert data["model"] == "small"
+
+
+def test_fix_keeps_light_model(monkeypatch, tmp_path, capsys):
+    appdata = tmp_path / "appdata" / "Golos"
+    appdata.mkdir(parents=True)
+    (appdata / "config.json").write_text(json.dumps({"model": "small"}), encoding="utf-8")
+
+    diagnose.fix_config(appdata, cuda_ok=False)
+    capsys.readouterr()
+
+    data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
+    assert data["model"] == "small"
