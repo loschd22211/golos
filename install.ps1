@@ -82,12 +82,26 @@ Write-Ok "Зависимости установлены"
 $nvidia = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -match "NVIDIA" }
 if ($nvidia) {
-    Write-Step "Ставлю библиотеки CUDA для видеокарты (один раз, ~1 ГБ, потом быстро)"
-    & cmd /c "`"$venvPython`" -m pip install --quiet nvidia-cublas-cu12 nvidia-cudnn-cu12"
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Библиотеки CUDA не установились — работаем на процессоре (медленнее)."
+    # Проверяем, стоят ли уже: повторная установка занимает секунды, а первая —
+    # это ~1 ГБ загрузки. Не запускаем pip зря и не пугаем человека прогрессом.
+    $cudaRoot = Join-Path $root ".venv\Lib\site-packages\nvidia"
+    $hasCuda = (Test-Path (Join-Path $cudaRoot "cublas")) -and (Test-Path (Join-Path $cudaRoot "cudnn"))
+
+    if ($hasCuda) {
+        Write-Ok "Библиотеки CUDA уже установлены"
     } else {
-        Write-Ok "Библиотеки CUDA установлены — распознавание пойдёт на видеокарте"
+        Write-Step "Качаю библиотеки CUDA для видеокарты"
+        Write-Host "   Это ~1 ГБ и займёт 5-15 минут (зависит от скорости интернета)." -ForegroundColor DarkGray
+        Write-Host "   Делается один раз: дальше играет роль, что они уже стоят." -ForegroundColor DarkGray
+        Write-Host "   Если не хочется ждать — Ctrl+C, программа будет работать на процессоре." -ForegroundColor DarkGray
+        Write-Host ""
+        # --progress-bar on: видно, что загрузка идёт, а не зависла.
+        & cmd /c "`"$venvPython`" -m pip install --progress-bar on nvidia-cublas-cu12 nvidia-cudnn-cu12"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Библиотеки CUDA не установились — работаем на процессоре (медленнее)."
+        } else {
+            Write-Ok "Библиотеки CUDA установлены — распознавание пойдёт на видеокарте"
+        }
     }
 } else {
     Write-Ok "Видеокарта NVIDIA не найдена — работаем на процессоре"

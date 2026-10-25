@@ -434,3 +434,23 @@ def test_fix_enables_gpu_when_cuda_works(tmp_path, capsys):
     data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
     assert data["device"] == "auto"
     assert data["compute_type"] == "auto"
+
+
+def test_fix_pins_russian_language(monkeypatch, tmp_path, capsys, no_deps):
+    """«auto» путал русскую речь с английской — --fix ставит ru."""
+    appdata = tmp_path / "appdata" / "Golos"
+    appdata.mkdir(parents=True)
+    (appdata / "config.json").write_text(json.dumps({"language": "auto"}), encoding="utf-8")
+
+    run(monkeypatch, tmp_path, "--fix")
+    capsys.readouterr()
+
+    data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
+    assert data["language"] == "ru"
+
+
+def test_verdict_is_printed_by_python(monkeypatch, tmp_path, capsys, no_deps):
+    """Итог печатает сама диагностика, чтобы вердикт был один."""
+    run(monkeypatch, tmp_path)
+    out = capsys.readouterr().out
+    assert "Итог:" in out

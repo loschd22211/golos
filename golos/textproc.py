@@ -7,6 +7,7 @@ Whisper уже расставляет знаки препинания, но вы
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from .config import Config
 
@@ -25,6 +26,27 @@ _TOKENS = re.compile(r"</?\|[^>]*\|>|<\|[^|]*\|>")
 _EMOJI = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF\u2190-\u21FF\u2B00-\u2BFF]"
 )
+
+# Символы, которые в тексте имеют смысл (единицы, валюты, кавычки, тире).
+_KEEP_SYMBOLS = set(
+    "+=$€£¥%№&@#*/\\<>^~|_°±×§«»„“”‘’–—…·•©®™"
+)
+# Категории Unicode, которые считаем «своими»: буквы, цифры, пунктуация,
+# диакритика и пробелы. Всё остальное (значки, эмодзи, CJK-закорючки вроде «〬»,
+# управляющие и приватные символы) — мусор из обучающих данных Whisper.
+_ALLOWED_CATEGORIES = ("L", "N", "P", "Z")
+# Диакритика: только привычные диапазоны (é, й и т.п.). Экзотические пометки
+# вроде «〬» (U+302C) приходят из обучающих данных мусором.
+_MARK_RANGES = (
+    (0x0300, 0x036F), (0x0483, 0x0489), (0x0591, 0x05BD), (0x0610, 0x061A),
+    (0x064B, 0x065F), (0x1AB0, 0x1AFF), (0x1DC0, 0x1DFF), (0x20D0, 0x20FF),
+    (0xFE20, 0xFE2F),
+)
+
+
+def _is_allowed_mark(ch: str) -> bool:
+    code = ord(ch)
+    return any(start <= code <= end for start, end in _MARK_RANGES)
 
 _SPACES = re.compile(r"[ \t\u00a0\u2000-\u200a]+")
 _NEWLINES = re.compile(r"\s*\n+\s*")
@@ -64,6 +86,7 @@ def clean_text(text: str, config: Config | None = None, **overrides) -> str:
     result = _TOKENS.sub(" ", result)
     result = _NON_SPEECH.sub(" ", result)
     result = _EMOJI.sub(" ", result)
+    result = strip_junk_chars(result)
     result = _NEWLINES.sub(" ", result)
     result = _SPACES.sub(" ", result).strip()
 
@@ -80,6 +103,7 @@ def clean_text(text: str, config: Config | None = None, **overrides) -> str:
     # «?» + «!» оставляем, а «,,,» и «...» схлопываем (многоточие — в «…»).
     result = result.replace("...", "…")
     result = _MULTI_PUNCT.sub(r"\1", result)
+    result = collapse_repeats(result)
 
     result = apply_replacements(result, replacements)
     result = _SPACES.sub(" ", result).strip()
@@ -137,6 +161,64 @@ def preview(text: str, limit: int = 60) -> str:
     return flat[: limit - 1].rstrip() + "…"
 
 
+# --------------------------------------------------- мусор и зацикливания
+# Whisper иногда «залипает»: повторяет один символ («Аллоуууууу…») или слово
+# («Приём, приём, приём, приём»). В текст это попадать не должно.
+_ELONGATED = re.compile(r"(\w)\1{3,}", re.UNICODE)
+_REPEAT_WORD = re.compile(
+    r"(?<![\w-])([\w'’-]{1,32})(?:[ \t]*[,;.!?…]?[ \t]+\1(?![\w-])){2,}",
+    re.IGNORECASE | re.UNICODE,
+)
+_REPEAT_PHRASE = re.compile(
+    r"(?<![\w-])([\w'’-]{1,32}[ \t]+[\w'’-]{1,32})"
+    r"(?:[ \t]*[,;.!?…]?[ \t]+\1(?![\w-])){1,}",
+    re.IGNORECASE | re.UNICODE,
+)
+_LOOP_RUN = re.compile(r"(\w)\1{4,}", re.UNICODE)
+_LOOP_WORDS = re.compile(
+    r"(?<![\w-])([\w'’-]{1,32})(?:[ \t]*[,;.!?…]?[ \t]+\1(?![\w-])){3,}",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def strip_junk_chars(text: str) -> str:
+    """Убрать символы, которых в человеческой речи не бывает."""
+    if not text:
+        return ""
+    out = []
+    for ch in text:
+        if ch in _KEEP_SYMBOLS or ch.isspace():
+            out.append(ch)
+            continue
+        category = unicodedata.category(ch)[0]
+        if category in _ALLOWED_CATEGORIES:
+            out.append(ch)
+        elif category == "M" and _is_allowed_mark(ch):
+            out.append(ch)
+    return "".join(out)
+
+
+def collapse_repeats(text: str) -> str:
+    """Схлопнуть зацикливания: «Аллоуууу» → «Аллоууу», «да, да, да» → «да»."""
+    if not text:
+        return ""
+    result = _ELONGATED.sub(lambda m: m.group(1) * 3, text)
+    for _ in range(3):
+        new = _REPEAT_PHRASE.sub(r"\1", result)
+        new = _REPEAT_WORD.sub(r"\1", new)
+        if new == result:
+            break
+        result = new
+    return result
+
+
+def looks_like_loop(text: str) -> bool:
+    """Текст — зацикливание модели (повтор символа/слова), а не речь."""
+    if not text:
+        return False
+    return bool(_LOOP_RUN.search(text) or _LOOP_WORDS.search(text))
+
+
 # --------------------------------------------------- галлюцинации распознавания
 # Whisper на тишине, шуме и обрывках фраз «вспоминает» титры и заставки из
 # обучающих данных. По-русски это чаще всего «Редактор субтитров А.Семкин
@@ -176,6 +258,8 @@ def _squash(text: str) -> str:
 
 def looks_like_hallucination(text: str) -> bool:
     """Похоже ли на «выдумку» модели, а не на речь пользователя."""
+    if looks_like_loop(text or ""):
+        return True
     plain = _squash(text).strip(" .,!?…-—:;\"'()[]{}")
     if not plain:
         return True

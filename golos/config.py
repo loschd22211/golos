@@ -23,8 +23,8 @@ MODEL_LABELS = {
 }
 
 LANGUAGES = {
-    "auto": "Авто (русский + английский)",
-    "ru": "Только русский",
+    "ru": "Русский (по умолчанию)",
+    "auto": "Авто — определять по речи",
     "en": "Только английский",
 }
 
@@ -32,6 +32,8 @@ INSERT_METHODS = {
     "paste": "Вставка через буфер обмена (быстро)",
     "type": "Печать посимвольно (буква за буквой)",
 }
+
+CONFIG_VERSION = 2
 
 DEVICES = ("auto", "cpu", "cuda")
 COMPUTE_TYPES = ("auto", "int8", "int8_float16", "float16", "float32")
@@ -111,7 +113,11 @@ class Config:
     model: str = "small"
     device: str = "auto"
     compute_type: str = "auto"
-    language: str = "auto"
+    # Русский по умолчанию. С «auto» на коротких кусках Whisper постоянно
+    # принимал русскую речь за английскую и писал «Fiking», «Thank you»,
+    # «Ok. It's good.» вместо сказанного. Английские термины («commit», «push»)
+    # при language="ru" всё равно распознаются — они в словаре модели.
+    language: str = "ru"
     beam_size: int = 3
     vad_filter: bool = True
     condition_on_previous_text: bool = False
@@ -145,6 +151,10 @@ class Config:
     history_enabled: bool = True
     log_level: str = "INFO"
 
+    # Версия схемы: по ней понятно, какие значения человек выбрал сам, а какие
+    # остались от старых версий (см. миграцию языка в load_config).
+    config_version: int = CONFIG_VERSION
+
     def __post_init__(self) -> None:
         self.normalize()
 
@@ -154,7 +164,7 @@ class Config:
         self.model = _pick(self.model, MODELS, "small")
         self.device = _pick(self.device, DEVICES, "auto")
         self.compute_type = _pick(self.compute_type, COMPUTE_TYPES, "auto")
-        self.language = _pick(self.language, tuple(LANGUAGES), "auto")
+        self.language = _pick(self.language, tuple(LANGUAGES), "ru")
         self.insert_method = _pick(self.insert_method, tuple(INSERT_METHODS), "paste")
 
         self.hotkey = str(self.hotkey or "").strip() or "ctrl+alt+space"
@@ -206,6 +216,11 @@ def load_config(path: Path | None = None) -> tuple[Config, Path | None]:
         if (config.initial_prompt or "").strip() in LEGACY_INITIAL_PROMPTS:
             # Старый промпт подмешивался в текст: чистим.
             config.initial_prompt = ""
+        if raw.get("language") == "auto" and int(raw.get("config_version") or 1) < 2:
+            # Версии до 1.3.1 всегда писали "auto": на коротких кусках это
+            # принимало русскую речь за английскую. Меняем один раз; осознанный
+            # выбор "auto" в настройках сохраняется вместе с config_version.
+            config.language = "ru"
         if "streaming" not in raw:
             # Конфиг от версии без потокового режима: там по умолчанию стояла
             # тяжёлая модель medium, из-за неё запуск занимал десятки секунд.

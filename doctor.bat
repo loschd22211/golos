@@ -11,14 +11,8 @@ echo.
 echo   Проверяю всё по шагам. Когда появится "Запись N секунд" — говорите!
 echo.
 ".venv\Scripts\python.exe" -m golos.diagnose %*
+rem Итог печатает сама диагностика: одна правда, без двух разных вердиктов.
 set RESULT=%errorlevel%
-echo.
-if "%RESULT%"=="0" (
-    echo   Диагностика закончена: критичных проблем нет.
-) else (
-    echo   Диагностика нашла проблемы — смотрите строки [БЕДА] выше.
-    echo   Быстрое лечение настроек: .\doctor.bat --fix
-)
 echo.
 pause
 exit /b %RESULT%

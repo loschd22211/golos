@@ -537,3 +537,33 @@ def test_hallucinated_subtitle_credits_are_dropped():
 
     assert injector.inserted == []
     assert "субтитр" not in stream.committed_text.lower()
+
+
+def test_looped_chunk_is_not_inserted():
+    """«Аллоууууу…» / «Приём, приём, приём» — зацикливание модели, не речь."""
+    import numpy as np
+
+    class LoopTranscriber(WordTranscriber):
+        def segments(self, audio, config=None, initial_prompt=None, beam_size=None,
+                     want_words=True):
+            duration = audio.size / 16000.0
+            text = "Приём, приём, приём, приём!"
+            return [{
+                "text": text,
+                "start": 0.0,
+                "end": duration,
+                "words": [{"word": text, "start": 0.0, "end": duration}],
+            }]
+
+    injector = FakeInjector()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=LoopTranscriber(),
+        injector=injector,
+        config=Config(),
+    )
+
+    stream._process_tail(np.full(16000 * 3, 0.1, dtype=np.float32), final=False)
+
+    assert injector.inserted == []
+    assert "приём" not in stream.committed_text.lower()
