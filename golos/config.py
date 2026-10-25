@@ -33,7 +33,7 @@ INSERT_METHODS = {
     "type": "Печать посимвольно (буква за буквой)",
 }
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 DEVICES = ("auto", "cpu", "cuda")
 COMPUTE_TYPES = ("auto", "int8", "int8_float16", "float16", "float32")
@@ -142,8 +142,11 @@ class Config:
     # --- интерфейс / прочее ---
     # Плашка — «стекло»: полупрозрачная, со скруглёнными углами. Размытие фона
     # работает на Windows 10/11 (акрил); прозрачность регулируется 0.35–1.0.
-    overlay_glass: bool = True
-    overlay_opacity: float = 0.93
+    # Размытие фона (акрил). По умолчанию выключено: акрил красит ВЕСЬ
+    # прямоугольник окна, и если система не дала скруглить углы, вокруг
+    # плашки появляется серый квадрат. Включается галочкой в настройках.
+    overlay_glass: bool = False
+    overlay_opacity: float = 0.94
     # Держать окно-получатель закреплённым на время диктовки: переключение
     # вкладок не уводит текст. Выключите, если мешает возврат фокуса.
     pin_target: bool = True
@@ -189,8 +192,8 @@ class Config:
         self.sample_rate = _clamp_int(self.sample_rate, 8000, 48000, 16000)
         self.min_duration = _clamp_float(self.min_duration, 0.1, 10.0, 0.35)
         self.paste_delay = _clamp_float(self.paste_delay, 0.0, 2.0, 0.15)
-        self.overlay_opacity = _clamp_float(self.overlay_opacity, 0.35, 1.0, 0.93)
-        self.overlay_glass = _as_bool(self.overlay_glass, True)
+        self.overlay_opacity = _clamp_float(self.overlay_opacity, 0.35, 1.0, 0.94)
+        self.overlay_glass = _as_bool(self.overlay_glass, False)
         self.pin_target = _as_bool(self.pin_target, True)
         self.run_as_admin = _as_bool(self.run_as_admin, True)
         self.replacements = _clean_replacements(self.replacements)
@@ -226,7 +229,17 @@ def load_config(path: Path | None = None) -> tuple[Config, Path | None]:
         if (config.initial_prompt or "").strip() in LEGACY_INITIAL_PROMPTS:
             # Старый промпт подмешивался в текст: чистим.
             config.initial_prompt = ""
-        if raw.get("language") == "auto" and int(raw.get("config_version") or 1) < 2:
+        try:
+            saved_version = int(raw.get("config_version") or 1)
+        except (TypeError, ValueError):
+            saved_version = 1
+        if saved_version < 3:
+            # 1.4.0 включал акрил по умолчанию, а без скругления окна он красил
+            # весь прямоугольник — получался «серый квадрат» вокруг плашки.
+            config.overlay_glass = False
+            if abs(float(getattr(config, "overlay_opacity", 0.0)) - 0.93) < 1e-6:
+                config.overlay_opacity = 0.94
+        if raw.get("language") == "auto" and saved_version < 2:
             # Версии до 1.3.1 всегда писали "auto": на коротких кусках это
             # принимало русскую речь за английскую. Меняем один раз; осознанный
             # выбор "auto" в настройках сохраняется вместе с config_version.

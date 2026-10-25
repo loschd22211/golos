@@ -154,3 +154,24 @@ def test_saved_config_remembers_new_version(tmp_path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["config_version"] >= 2
     assert data["language"] == "ru"
+
+
+def test_blur_is_switched_off_for_old_configs(tmp_path):
+    """1.4.0 включал акрил по умолчанию — из-за него был «серый квадрат»."""
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"overlay_glass": True, "overlay_opacity": 0.93, "config_version": 2}),
+        encoding="utf-8",
+    )
+    cfg, _ = load_config(path)
+    assert cfg.overlay_glass is False
+    assert cfg.overlay_opacity == 0.94
+
+
+def test_new_config_keeps_explicit_blur(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"overlay_glass": True, "config_version": 3}), encoding="utf-8"
+    )
+    cfg, _ = load_config(path)
+    assert cfg.overlay_glass is True
