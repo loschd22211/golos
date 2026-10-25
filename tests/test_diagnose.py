@@ -284,3 +284,98 @@ def test_fix_keeps_light_model(monkeypatch, tmp_path, capsys):
 
     data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
     assert data["model"] == "small"
+
+
+# ------------------------------------- прогресс при загрузке и переиспользование
+class FakeTranscriber:
+    def __init__(self, config, models_dir=None):
+        self.config = config
+        self.models_dir = models_dir
+        self.active_device = "cpu"
+        self.active_compute = "int8"
+        self.fallback_reason = ""
+        self.preloads = 0
+        self.downloaded = False
+
+    def is_model_downloaded(self, model=None):
+        return self.downloaded
+
+    def preload(self):
+        self.preloads += 1
+
+    def segments(self, samples, config, **kwargs):
+        return [
+            {"start": 0.0, "end": 0.6, "text": "привет",
+             "words": [{"start": 0.0, "end": 0.6, "word": "привет"}]},
+        ]
+
+    def transcribe(self, samples, config):
+        return types.SimpleNamespace(text="привет", language="ru")
+
+
+class FakeSamples:
+    """Замена numpy-массива: нужны только size и срез."""
+
+    def __init__(self, size):
+        self.size = size
+
+    def __getitem__(self, item):
+        start, stop = item.start or 0, item.stop if item.stop is not None else self.size
+        return FakeSamples(max(0, min(stop, self.size) - start))
+
+
+def _patch_transcriber(monkeypatch, transcriber):
+    module = types.ModuleType("golos.transcribe")
+    module.WhisperTranscriber = lambda config, models_dir=None: transcriber
+    module.TranscriptionError = RuntimeError
+    monkeypatch.setitem(sys.modules, "golos.transcribe", module)
+
+
+def test_check_model_warns_about_download(monkeypatch, tmp_path, capsys):
+    from golos.config import Config
+
+    transcriber = FakeTranscriber(Config())
+    _patch_transcriber(monkeypatch, transcriber)
+    diagnose.warnings.clear()
+
+    result = diagnose.check_model(Config(), tmp_path, None)
+
+    out = capsys.readouterr().out
+    assert "ещё не скачана" in out
+    assert "470" in out
+    assert result is transcriber
+    assert any("скачана" in w for w in diagnose.warnings)
+
+
+def test_streaming_check_reuses_loaded_model(monkeypatch, tmp_path, capsys):
+    from golos.config import Config
+
+    config = Config()
+    transcriber = FakeTranscriber(config)
+    _patch_transcriber(monkeypatch, transcriber)
+    recording = types.SimpleNamespace(
+        samples=FakeSamples(int(config.sample_rate * 3)),
+        sample_rate=config.sample_rate,
+        duration=3.0,
+        peak=0.5,
+    )
+
+    diagnose.check_streaming_logic(config, tmp_path, recording, transcriber)
+
+    assert "вставится" in capsys.readouterr().out
+    assert transcriber.preloads == 0  # модель уже загружена выше в отчёте
+
+
+def test_run_with_progress_reports_long_work(capsys):
+    import time as _time
+
+    value = diagnose._run_with_progress("модель", lambda: (_time.sleep(0.05), "готово")[1])
+    assert value == "готово"
+
+
+def test_run_with_progress_raises(capsys):
+    def boom():
+        raise RuntimeError("нет интернета")
+
+    with pytest.raises(RuntimeError, match="интернет"):
+        diagnose._run_with_progress("модель", boom)

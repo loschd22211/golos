@@ -90,6 +90,34 @@ def check_environment(root: Path) -> None:
         say(OK, "версия Python подходит")
 
 
+def _run_with_progress(label: str, func, every: float = 5.0):
+    """Выполнить долгую операцию, показывая, что программа жива.
+
+    Загрузка модели на процессоре и её скачивание занимают минуты, а без
+    вывода консоль выглядит зависшей — пользователь закрывает диагностику.
+    """
+    import threading
+
+    result = {}
+
+    def target() -> None:
+        try:
+            result["value"] = func()
+        except BaseException as exc:  # noqa: BLE001 - пробрасываем наверх
+            result["error"] = exc
+
+    started = time.time()
+    thread = threading.Thread(target=target, name="golos-diagnose", daemon=True)
+    thread.start()
+    while thread.is_alive():
+        thread.join(every)
+        if thread.is_alive():
+            print(f"     … {label}: идёт {time.time() - started:.0f} c", flush=True)
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
 def check_code_version(root: Path) -> None:
     """Не запущена ли старая копия кода — из-за этого «фиксы не работают»."""
     section("Версия кода")
@@ -332,14 +360,24 @@ def check_recording(config, seconds: float):
     return recording
 
 
-def check_model(config, appdata: Path, recording) -> None:
+def check_model(config, appdata: Path, recording):
+    """Загрузить модель и распознать запись. Возвращает транслятор для проверок."""
     section("Модель и распознавание")
     try:
         from golos.transcribe import WhisperTranscriber
 
         transcriber = WhisperTranscriber(config, appdata / "models")
+        if transcriber.is_model_downloaded():
+            print(f"     загружаю модель {config.model} с диска…", flush=True)
+        else:
+            say(
+                WARN,
+                f"модель {config.model} ещё не скачана",
+                "первый запуск скачает ~470 МБ: это минуты, нужен интернет",
+            )
+            print(f"     качаю модель {config.model}…", flush=True)
         started = time.time()
-        transcriber.preload()
+        _run_with_progress(f"модель {config.model}", transcriber.preload)
         load_time = time.time() - started
         device = getattr(transcriber, "active_device", "") or "?"
         compute = getattr(transcriber, "active_compute", "") or "?"
@@ -351,7 +389,7 @@ def check_model(config, appdata: Path, recording) -> None:
 
         if recording is None:
             say(WARN, "распознавание не проверено", "не было записи")
-            return
+            return transcriber
 
         started = time.time()
         result = transcriber.transcribe(recording.samples, config)
@@ -364,12 +402,14 @@ def check_model(config, appdata: Path, recording) -> None:
         else:
             say(BAD, "модель вернула пустой текст",
                 "проверьте микрофон и язык в настройках")
+        return transcriber
     except Exception as exc:
         say(BAD, "распознавание не работает", str(exc))
         traceback.print_exc()
+        return None
 
 
-def check_streaming_logic(config, appdata: Path, recording) -> None:
+def check_streaming_logic(config, appdata: Path, recording, transcriber=None) -> None:
     """Проверить, что потоковый режим вообще способен что-то вставить."""
     section("Потоковая вставка (главная проверка)")
     if recording is None:
@@ -377,9 +417,10 @@ def check_streaming_logic(config, appdata: Path, recording) -> None:
         return
 
     try:
-        from golos.transcribe import WhisperTranscriber
+        if transcriber is None:
+            from golos.transcribe import WhisperTranscriber
 
-        transcriber = WhisperTranscriber(config, appdata / "models")
+            transcriber = WhisperTranscriber(config, appdata / "models")
         piece = recording.samples[: int(min(4.0, recording.duration) * config.sample_rate)]
         duration = piece.size / config.sample_rate
         segments = transcriber.segments(piece, config)
@@ -521,8 +562,8 @@ def main(argv: list[str] | None = None) -> int:
     recording = None
     if not args.no_record:
         recording = check_recording(config, max(2.0, args.record))
-    check_model(config, appdata, recording)
-    check_streaming_logic(config, appdata, recording)
+    transcriber = check_model(config, appdata, recording)
+    check_streaming_logic(config, appdata, recording, transcriber)
     check_log(appdata)
 
     section("Итог")
