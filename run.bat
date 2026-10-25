@@ -1,0 +1,83 @@
+@echo off
+rem Голос — единая точка входа: при первом запуске ставит зависимости, потом запускает.
+rem
+rem   .\run.bat            — обычный запуск (с окном программы)
+rem   .\run.bat --silent   — только трей, без окна (так работает автозапуск)
+rem   .\run.bat --debug    — запуск с консолью и подробным журналом
+rem   .\run.bat --no-gui   — без интерфейса, текст печатается в консоль
+cd /d "%~dp0"
+chcp 65001 >nul 2>&1
+
+if exist ".venv\Scripts\pythonw.exe" goto run
+
+echo.
+echo   Первый запуск: устанавливаю зависимости (несколько минут)...
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" -Quiet
+if errorlevel 1 goto fail
+if not exist ".venv\Scripts\pythonw.exe" goto fail
+echo.
+echo   Установка завершена, запускаю «Голос».
+echo.
+
+:run
+if /i "%~1"=="--debug" goto run_debug
+if /i "%~1"=="--console" goto run_debug
+if /i "%~1"=="--no-gui" goto run_console
+
+rem Если программа уже работает — второй раз не запускаем.
+".venv\Scripts\python.exe" "golos_app.py" --status >nul 2>&1
+if not errorlevel 1 goto already_running
+
+start "" ".venv\Scripts\pythonw.exe" "golos_app.py" %*
+echo   Запускаю...
+ping -n 3 127.0.0.1 >nul 2>&1
+
+".venv\Scripts\python.exe" "golos_app.py" --status >nul 2>&1
+if errorlevel 1 goto launch_failed
+
+echo.
+echo   Готово: «Голос» работает.
+echo     - окно программы должно быть на экране;
+echo     - иконка микрофона — в трее рядом с часами (если не видно: стрелка ^);
+echo     - запись: Ctrl+Alt+Space (нажали, сказали, нажали ещё раз).
+exit /b 0
+
+:already_running
+echo.
+echo   «Голос» уже запущен — второй раз не нужно.
+echo     Иконка микрофона в трее рядом с часами (если не видно: стрелка ^).
+echo     Клавиша записи: Ctrl+Alt+Space
+echo     Плашка: правый клик по иконке -^> "Открыть «Голос»"
+echo.
+echo   Если ничего не происходит — запустите диагностику: .\doctor.bat
+exit /b 0
+
+:launch_failed
+echo.
+echo   Программа не смогла запуститься. Запускаю в режиме с консолью,
+echo   чтобы показать ошибку:
+echo.
+goto run_debug
+
+:run_debug
+".venv\Scripts\python.exe" "golos_app.py" --debug --show
+echo.
+echo   Ошибка выше также записана в журнал: %APPDATA%\Golos\golos.log
+echo   Полная диагностика: .\doctor.bat
+pause
+exit /b 0
+
+:run_console
+".venv\Scripts\python.exe" "golos_app.py" --no-gui --debug
+pause
+exit /b 0
+
+:fail
+echo.
+echo   Не удалось установить зависимости.
+echo   Проверьте, что установлен Python 3.10+ (галочка "Add python.exe to PATH"),
+echo   и что есть интернет. Подробности — выше в этом окне.
+echo.
+pause
+exit /b 1
