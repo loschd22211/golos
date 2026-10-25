@@ -218,6 +218,15 @@ def check_config(appdata: Path) -> tuple:
         config, broken = load_config(path)
         print(f"     итог: модель={config.model}, streaming={config.streaming}, "
               f"язык={config.language}, beam={config.beam_size}")
+        if not config.streaming:
+            say(BAD, "потоковая вставка выключена",
+                "текст появится только после остановки записи — doctor.bat --fix включит её")
+        if config.language == "ru":
+            say(WARN, "язык жёстко русский",
+                "английские слова будут записаны кириллицей — для смешанной речи поставьте auto")
+        if config.model in ("medium", "large-v3"):
+            say(WARN, f"модель {config.model} тяжёлая",
+                "на процессоре первый текст появится через минуты — поставьте small")
         return config, raw
     except Exception:
         traceback.print_exc()
@@ -460,16 +469,23 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
     )
     if data.get("language") not in ("auto", "ru", "en"):
         data["language"] = "auto"
+    if data.get("streaming") is not True:
+        data["streaming"] = True
     if cuda_ok is False:
         # Незачем каждый запуск пытаться поднять CUDA, если библиотек нет:
         # это лишние секунды и запись в журнал.
         data["device"] = "cpu"
         data["compute_type"] = "int8"
+        if data.get("model") in ("medium", "large", "large-v2", "large-v3"):
+            data["model"] = "small"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         say(OK, "настройки обновлены", str(path))
         print("     модель small, потоковая вставка включена, beam 3")
+        if data.get("device") == "cpu":
+            print("     устройство cpu/int8 (CUDA недоступна), язык: "
+                  f"{data.get('language', 'auto')}")
     except Exception as exc:
         say(BAD, "не удалось записать настройки", str(exc))
 

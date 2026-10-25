@@ -217,7 +217,7 @@ cd C:\Users\user\Downloads\golos
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements-dev.txt
-python -m pytest -q          # 139 тестов, ~4 секунды
+python -m pytest -q          # 141 тест, ~4 секунды
 python golos_app.py --debug  # запуск с журналом в консоли
 ```
 
@@ -240,7 +240,7 @@ golos/
   system.py       один экземпляр, автозапуск, диалоги ошибок
 golos_app.py      точка входа: оверлей + трей + очередь событий
   diagnose.py     диагностика в терминале (doctor.bat)
-tests/            139 тестов без Windows, микрофона и модели
+tests/            141 тест без Windows, микрофона и модели
 ```
 
 Ядро (`DictationApp`) не зависит от GUI: интерфейс получает события через
