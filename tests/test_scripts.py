@@ -43,3 +43,23 @@ def test_install_installs_cuda_packages_only_for_nvidia():
     text = (ROOT / "install.ps1").read_text(encoding="utf-8-sig")
     assert "nvidia-cublas-cu12" in text and "nvidia-cudnn-cu12" in text
     assert "Win32_VideoController" in text  # без NVIDIA не качаем гигабайт
+
+
+def test_install_explains_cuda_download_time():
+    """Пользователь не должен думать, что установка зависла."""
+    text = (ROOT / "install.ps1").read_text(encoding="utf-8-sig")
+    assert "1 ГБ" in text
+    assert "минут" in text
+    assert "--progress-bar" in text  # прогресс виден
+
+
+def test_install_skips_cuda_when_already_present():
+    text = (ROOT / "install.ps1").read_text(encoding="utf-8-sig")
+    assert "Библиотеки CUDA уже установлены" in text
+
+
+def test_doctor_bat_does_not_print_its_own_verdict():
+    """Два разных вердикта в одном экране сбивали с толку."""
+    text = (ROOT / "doctor.bat").read_text(encoding="utf-8")
+    assert "Диагностика нашла проблемы" not in text
+    assert "Диагностика закончена" not in text

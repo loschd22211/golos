@@ -411,6 +411,9 @@ def check_recording(config, seconds: float):
         time.sleep(0.1)
         peak = max(peak, recorder.peak)
         print(".", end="", flush=True)
+        # Услышали голос и уже есть что распознавать — не тянем время зря.
+        if peak >= 0.03 and time.time() - started >= 3.0:
+            break
     print()
     recording = recorder.stop()
 
@@ -419,11 +422,19 @@ def check_recording(config, seconds: float):
         return None
 
     print(f"     длительность: {recording.duration:.2f} c, пик: {recording.peak:.3f}")
+    # Иногда устройство открылось, но звук почти не шёл: микрофон занят другой
+    # программой. Распознавать такие полсекунды бессмысленно — предупреждаем.
+    if recording.duration < seconds * 0.5:
+        say(WARN, "микрофон отдал слишком мало звука",
+            f"{recording.duration:.1f} c из {seconds:g} c — закройте «Голос» "
+            "и другие программы с микрофоном, повторите")
+        return None
     if recording.peak < 0.01:
         say(BAD, "микрофон молчит (тишина)",
+            "говорить нужно сразу после этой строки; если не помогло — "
             "Параметры → Конфиденциальность → Микрофон → разрешить приложениям")
-    else:
-        say(OK, "звук с микрофона есть")
+        return recording
+    say(OK, "звук с микрофона есть")
     return recording
 
 
@@ -466,6 +477,9 @@ def check_model(config, appdata: Path, recording):
         if result.text.strip():
             ratio = elapsed / max(0.1, recording.duration)
             say(OK, "речь распознаётся", f"{ratio:.2f}× от длительности")
+        elif recording.peak < 0.01:
+            say(WARN, "распознавать было нечего",
+                "в записи тишина — модель проверена, дело не в ней")
         else:
             say(BAD, "модель вернула пустой текст",
                 "проверьте микрофон и язык в настройках")
@@ -510,7 +524,10 @@ def check_streaming_logic(config, appdata: Path, recording, transcriber=None) ->
                       f"{segment['text']!r} (без таймингов слов)")
 
         if not segments:
-            say(BAD, "модель не вернула сегментов на куске речи")
+            quiet = recording.peak < 0.01
+            say(WARN if quiet else BAD,
+                "модель не вернула сегментов на куске речи",
+                "в записи тишина — потоковый режим не проверить" if quiet else "")
         elif ready:
             say(OK, "текст будет вставляться по ходу речи", f"готово слов: {ready}")
         else:
@@ -603,8 +620,11 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
             "beam_size": 3,
         }
     )
-    if data.get("language") not in ("auto", "ru", "en"):
-        data["language"] = "auto"
+    # «auto» на коротких кусках путал русскую речь с английской
+    # («Fiking», «Thank you») — фиксируем русский, английские термины
+    # модель всё равно знает. Кому нужно иначе — «Только английский».
+    if data.get("language") not in ("ru", "en"):
+        data["language"] = "ru"
     if data.get("streaming") is not True:
         data["streaming"] = True
     if cuda_ok:
@@ -622,12 +642,18 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         say(OK, "настройки обновлены", str(path))
-        print("     модель small, потоковая вставка включена, beam 3")
+        print(f"     модель {data.get('model')}, язык {data.get('language')}, "
+              "потоковая вставка включена, beam 3")
         if cuda_ok:
             print("     устройство auto — видеокарта работает, будет быстро")
+            if data.get("model") == "small":
+                print("     на видеокарте можно взять точнее: в настройках "
+                      "модель medium (скачается ~1.5 ГБ)")
+        print("     перезапустите «Голос» (плашка → ✕, затем ярлык), "
+              "чтобы настройки применились")
         if data.get("device") == "cpu":
             print("     устройство cpu/int8 (CUDA недоступна), язык: "
-                  f"{data.get('language', 'auto')}")
+                  f"{data.get('language', 'ru')}")
     except Exception as exc:
         say(BAD, "не удалось записать настройки", str(exc))
 
@@ -675,8 +701,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{BAD} проблем: {len(failures)}")
         for item in failures:
             print(f"     - {item}")
+        print(f"\nИтог: проблем {len(failures)} — смотрите строки [БЕДА] выше.")
     else:
         print(f"{OK} критичных проблем не найдено")
+        print("\nИтог: всё в порядке. Запускайте .\\run.bat и диктуйте.")
     if warnings:
         print(f"{WARN} замечаний: {len(warnings)}")
         for item in warnings:

@@ -248,10 +248,13 @@ class StreamingDictator:
         if not raw:
             return
 
+        # Проверяем ДО чистки: «Аллоуууууу…» и «Приём, приём, приём» после
+        # схлопывания выглядят прилично, но это всё равно зацикливание модели.
+        raw_loop = looks_like_hallucination(raw)
         text = clean_text(raw, cfg)
 
-        if text.strip() and looks_like_hallucination(text):
-            log.info("Поток: отброшена выдумка модели %r", text[:60])
+        if text.strip() and (raw_loop or looks_like_hallucination(text)):
+            log.info("Поток: отброшена выдумка модели %r", (text or raw)[:60])
             self._commit(rate, ready[-1]["end"])
             return
 
