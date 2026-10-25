@@ -114,6 +114,12 @@ class DictationApp:
             except Exception:  # pragma: no cover - экзотический инжектор
                 pass
         self.admin = elevate.is_admin()
+        # Фокус возвращаем прямо в момент вставки: к этому времени он мог
+        # уехать в оверлей (клик, меню трея), и Ctrl+V пропадал.
+        try:
+            self.injector.focus = lambda: self.focus_hook()
+        except Exception:  # pragma: no cover - экзотический инжектор
+            pass
         self.hotkeys = hotkeys or HotkeyManager()
         self.ui = ui or NullUi()
 

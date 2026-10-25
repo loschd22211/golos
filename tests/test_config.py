@@ -94,3 +94,39 @@ def test_status_flag_reports_not_running():
 
     assert golos_app.parse_args([]).status is False
     assert golos_app.parse_args(["--status"]).status is True
+
+
+# ----------------------------------------------------- промпт и обратная связь
+def test_default_prompt_is_empty():
+    """Длинная подсказка вылезала в текст: модель дописывала её как реплику."""
+    from golos.config import Config
+
+    assert Config().initial_prompt == ""
+
+
+def test_legacy_prompt_is_dropped_on_load(tmp_path):
+    import json
+
+    from golos.config import LEGACY_INITIAL_PROMPTS, load_config
+
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"initial_prompt": LEGACY_INITIAL_PROMPTS[0]}), encoding="utf-8"
+    )
+
+    config, broken = load_config(path)
+
+    assert broken is None
+    assert config.initial_prompt == ""
+
+
+def test_custom_prompt_is_kept(tmp_path):
+    import json
+
+    from golos.config import load_config
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"initial_prompt": "GitHub, Docker"}), encoding="utf-8")
+
+    config, _broken = load_config(path)
+    assert config.initial_prompt == "GitHub, Docker"

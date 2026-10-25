@@ -227,6 +227,36 @@ def check_rights() -> bool:
     return False
 
 
+def check_target_window() -> None:
+    """Куда уйдёт текст прямо сейчас: видно окно и его права."""
+    section("Окно для вставки")
+    import sys
+
+    if sys.platform != "win32":
+        say(WARN, "проверка только для Windows", sys.platform)
+        return
+    try:
+        from golos import elevate, winfocus
+
+        tracker = winfocus.TargetTracker()
+        tracker.remember_current()
+        print(f"     сейчас активно: {elevate.describe_window()}")
+        if tracker.hwnd:
+            print(f"     цель вставки:   {elevate.describe_window(tracker.hwnd)}")
+            say(OK, "окно-получатель определено", "текст пойдёт туда")
+        else:
+            say(
+                WARN,
+                "чужое активное окно не найдено",
+                "щёлкните в поле, куда нужен текст, и запустите диагностику снова",
+            )
+        if winfocus.is_our_window(winfocus.get_foreground_window()):
+            print("     (активно наше окно — так бывает, если щёлкнуть по плашке;")
+            print("      трекер цели всё равно печатает в последнее чужое окно)")
+    except Exception as exc:
+        say(WARN, "проверка окна не удалась", str(exc))
+
+
 def check_packages() -> None:
     section("Пакеты")
     required = ("faster_whisper", "sounddevice", "numpy", "keyboard", "pyperclip")
@@ -578,6 +608,7 @@ def main(argv: list[str] | None = None) -> int:
     check_code_version(root)
     config, raw = check_config(appdata)
     check_rights()
+    check_target_window()
     check_packages()
     cuda_ok = check_gpu(config)
     if args.fix:

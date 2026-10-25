@@ -73,6 +73,8 @@ class StreamingDictator:
         self._first_chunk = True
         self._last_error = ""
         self._fatal = False          # вставка невозможна: сеанс прекращаем
+        self._last_chunk = ""        # предыдущий вставленный кусок
+        self._same_chunk = 0         # сколько раз подряд он повторился
         self.chunks_inserted = 0
 
     # ------------------------------------------------------------------ state
@@ -102,6 +104,8 @@ class StreamingDictator:
         self._first_chunk = True
         self._last_error = ""
         self._fatal = False
+        self._last_chunk = ""
+        self._same_chunk = 0
         self._thread = threading.Thread(target=self._run, name="golos-stream", daemon=True)
         self._thread.start()
         log.info(
@@ -237,6 +241,25 @@ class StreamingDictator:
             return
 
         text = clean_text(raw, cfg)
+
+        # Whisper иногда зацикливается и выдаёт один и тот же кусок снова и снова
+        # (тишина, шум, обрывок фразы). Третий одинаковый подряд — почти всегда
+        # галлюцинация, и вставлять его в текст нельзя.
+        key = text.strip().lower()
+        if key and key == self._last_chunk:
+            self._same_chunk += 1
+        else:
+            self._last_chunk = key
+            self._same_chunk = 1
+        if self._same_chunk > 2:
+            log.info(
+                "Поток: пропускаю повтор куска %r (%d-й раз подряд)",
+                text[:40],
+                self._same_chunk,
+            )
+            self._commit(rate, ready[-1]["end"])
+            return
+
         end = ready[-1]["end"]
         log.info(
             "Поток: вставляю %.2f c текста (%s): %r",
@@ -283,12 +306,13 @@ class StreamingDictator:
         self._committed_samples = max(self._committed_samples, samples)
 
     def _context_prompt(self) -> str:
-        """Контекст для модели: подсказка + последние слова, чтобы не терять смысл."""
-        base = (self.config.initial_prompt or "").strip()
-        tail = self.committed_text.strip()[-120:]
-        if tail:
-            return f"{base} {tail}".strip()
-        return base
+        """Подсказка для модели (словарь терминов), без обратной связи.
+
+        Раньше сюда подмешивался уже вставленный текст. Модель начинала его
+        повторять: в журнале пользователя одна вставка шла за другой с тем же
+        «Понимаешь.» — классический цикл самоподтверждения.
+        """
+        return (self.config.initial_prompt or "").strip()
 
     def _fail(self, message: str) -> None:
         self._last_error = message

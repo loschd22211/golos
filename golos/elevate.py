@@ -131,22 +131,38 @@ def foreground_is_elevated() -> bool | None:  # pragma: no cover - Windows
     return pid_is_elevated(info.get("pid"))
 
 
-def describe_foreground() -> str:  # pragma: no cover - Windows
+def describe_window(hwnd=None) -> str:
     """Строка для журнала: что за окно и с какими правами."""
     from . import winfocus
 
-    info = winfocus.foreground_info()
-    if not info:
+    hwnd = hwnd or winfocus.get_foreground_window()
+    if not hwnd:  # pragma: no cover - Windows
         return "активное окно не определено"
-    title = (info.get("title") or "")[:60]
-    exe = info.get("exe") or "?"
-    elevated = pid_is_elevated(info.get("pid"))
+    pid = winfocus.window_pid(hwnd)
+    title = (winfocus.window_title(hwnd) or "")[:60]
+    exe = winfocus.process_exe(pid) or "?"
+    elevated = pid_is_elevated(pid)
     mark = {True: ", от администратора", False: "", None: ", права неизвестны"}[elevated]
     return f"«{title}» ({exe}{mark})"
 
 
-def insertion_guard() -> None:
+def describe_foreground() -> str:  # pragma: no cover - Windows
+    return describe_window()
+
+
+def window_is_elevated(hwnd) -> bool | None:
+    """Права конкретного окна (не того, что случайно активно сейчас)."""
+    from . import winfocus
+
+    return pid_is_elevated(winfocus.window_pid(hwnd))
+
+
+def insertion_guard(hwnd=None) -> None:
     """Вызывается перед каждой вставкой.
+
+    ``hwnd`` — окно, в которое реально пойдёт текст (его помнит трекер цели).
+    Без него берём текущее активное: активным мог оказаться наш же оверлей,
+    и тогда проверка прав была бы бессмысленной.
 
     Пишет в журнал, куда именно уйдёт текст, и не даёт соврать «вставлено»,
     если Windows всё равно заблокирует ввод.
@@ -154,8 +170,8 @@ def insertion_guard() -> None:
     if not _IS_WINDOWS:  # pragma: no cover - не Windows
         return
 
-    elevated = foreground_is_elevated()
-    log.info("Вставка в окно: %s", describe_foreground())
+    elevated = window_is_elevated(hwnd) if hwnd else foreground_is_elevated()
+    log.info("Вставка в окно: %s", describe_window(hwnd))
 
     if elevated and not is_admin():
         from .inject import InjectionError

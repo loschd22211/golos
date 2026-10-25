@@ -224,7 +224,9 @@ def test_first_chunk_reports_model_loading(rig):
     rig.dictator.cancel()
 
 
-def test_context_prompt_uses_committed_text(rig):
+def test_context_prompt_does_not_feed_back_inserted_text(rig):
+    """Вставленный текст нельзя подмешивать в промпт: модель начинает его
+    повторять (в журнале пользователя так появлялись десятки «Понимаешь.»)."""
     rig.dictator.start()
     rig.recorder.set_length(2.0)
     assert wait_for(lambda: rig.injector.inserted)
@@ -232,9 +234,11 @@ def test_context_prompt_uses_committed_text(rig):
     assert wait_for(lambda: len(rig.transcriber.calls) >= 2)
     rig.dictator.cancel()
 
-    prompts = [call["prompt"] for call in rig.transcriber.calls]
-    assert prompts[0] == rig.cfg.initial_prompt or prompts[0] is None
-    assert any(p and len(p) > len(rig.cfg.initial_prompt or "") for p in prompts[1:])
+    prompts = [call["prompt"] or "" for call in rig.transcriber.calls]
+    inserted = "".join(rig.injector.inserted) or ""
+    assert inserted
+    for prompt in prompts:
+        assert inserted.strip()[:20] not in prompt
 
 
 # ---------------------------------------------------- регрессия: непрерывная речь
@@ -398,3 +402,69 @@ def test_injection_error_stops_the_session():
     assert injector.calls == 1
     assert len(errors) == 1
     assert "администратора" in errors[0]
+
+
+def test_repeating_chunk_is_not_inserted_forever():
+    """Whisper зацикливается на шуме и выдаёт один и тот же кусок.
+
+    В журнале пользователя так появились десятки подряд «Понимаешь.» —
+    третий одинаковый кусок подряд вставлять нельзя.
+    """
+    import numpy as np
+
+    cfg = Config()
+    transcriber = WordTranscriber()  # всегда один и тот же текст
+    injector = FakeInjector()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=transcriber,
+        injector=injector,
+        config=cfg,
+    )
+
+    audio = np.zeros(16000 * 3, dtype=np.float32)
+    for _ in range(5):
+        stream._process_tail(audio, final=False)
+
+    assert len(injector.inserted) == 2  # третий и последующие повторы отброшены
+    assert stream.chunks_inserted == 2
+
+
+def test_different_chunks_are_all_inserted():
+    import numpy as np
+
+    class GrowingTranscriber(WordTranscriber):
+        def __init__(self):
+            super().__init__(words=("раз", "два", "три"))
+            self.step = 0
+
+        def segments(self, audio, config=None, initial_prompt=None, beam_size=None,
+                     want_words=True):
+            self.step += 1
+            duration = audio.size / 16000.0
+            first = f"слово{self.step}"
+            words = [
+                {"word": first, "start": 0.0, "end": duration / 2},
+                {"word": "хвост", "start": duration / 2, "end": duration},
+            ]
+            return [{
+                "text": f"{first} хвост",
+                "start": 0.0,
+                "end": duration,
+                "words": words,
+            }]
+
+    cfg = Config()
+    injector = FakeInjector()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=GrowingTranscriber(),
+        injector=injector,
+        config=cfg,
+    )
+
+    audio = np.zeros(16000 * 3, dtype=np.float32)
+    for _ in range(4):
+        stream._process_tail(audio, final=False)
+
+    assert len(injector.inserted) == 4

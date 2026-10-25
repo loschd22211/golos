@@ -281,6 +281,9 @@ class Overlay:
         try:
             self.root.deiconify()
             self.root.overrideredirect(True)
+            # Tk может пересоздать окно — стиль «не забирать фокус» ставим снова,
+            # иначе клик по плашке уводит фокус и Ctrl+V пропадает.
+            winfocus.make_no_activate(self.root)
             winfocus.keep_on_top(self.root, True)
         except tk.TclError:  # pragma: no cover
             pass

@@ -127,11 +127,15 @@ class TextInjector:
         keyboard: Keyboard | None = None,
         sleep=time.sleep,
         guard=None,
+        focus=None,
     ):
         self.method = method
         # Проверка перед вставкой: например, права окна-получателя.
         # Может бросить InjectionError, тогда текст не потеряется молча.
         self.guard = guard
+        # Возврат фокуса нужному окну. Без него Ctrl+V уходит в оверлей —
+        # со стороны это выглядит как «текст не вставляется».
+        self.focus = focus
         self.restore_clipboard = restore_clipboard
         self.paste_delay = paste_delay
         self.restore_delay = restore_delay
@@ -151,6 +155,11 @@ class TextInjector:
             return False
         if self.guard is not None:
             self.guard()
+        if self.focus is not None:
+            try:
+                self.focus()
+            except Exception as exc:  # pragma: no cover - фокус не критичен
+                log.debug("Не удалось вернуть фокус: %s", exc)
         if self.method == "type":
             return self._type(text)
         return self._paste(text)
