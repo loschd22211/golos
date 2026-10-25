@@ -81,12 +81,13 @@ Add-Section "Git"
 if (Test-Path (Join-Path $root ".git")) {
     Add-Line ("Ветка: " + (& git rev-parse --abbrev-ref HEAD 2>&1))
     Add-Line ("Коммит: " + (& git log -1 --oneline 2>&1))
-    Add-Line ("Файл golos/ui.py присутствует: " + (Test-Path (Join-Path $root "golos\ui.py")))
-    Add-Line ("Файл golos/settings_window.py присутствует: " + (Test-Path (Join-Path $root "golos\settings_window.py")))
+    foreach ($file in @("golos\overlay.py", "golos\streaming.py", "golos\winfocus.py", "golos\ui.py")) {
+        Add-Line ("Файл " + $file + ": " + (Test-Path (Join-Path $root $file)))
+    }
     & git status --short 2>&1 | ForEach-Object { Add-Line ("  " + $_) }
 } else {
     Add-Line "Папка не является git-репозиторием (распакован ZIP)"
-    Add-Line ("Файл golos/ui.py присутствует: " + (Test-Path (Join-Path $root "golos\ui.py")))
+    Add-Line ("Файл golos/overlay.py: " + (Test-Path (Join-Path $root "golos\overlay.py")))
 }
 
 Add-Section "Процессы"

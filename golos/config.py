@@ -91,12 +91,18 @@ class Config:
     hotkey: str = "ctrl+alt+space"
     cancel_hotkey: str = "esc"
 
+    # --- потоковый режим (текст появляется по мере речи) ---
+    streaming: bool = True
+    stream_step: float = 0.45      # как часто проверять новый звук
+    min_chunk_seconds: float = 1.2  # минимум звука для очередного куска
+    hold_back_seconds: float = 0.5  # сколько придерживать, чтобы не резать слово
+
     # --- распознавание ---
-    model: str = "medium"
+    model: str = "small"
     device: str = "auto"
     compute_type: str = "auto"
     language: str = "auto"
-    beam_size: int = 5
+    beam_size: int = 3
     vad_filter: bool = True
     condition_on_previous_text: bool = False
     initial_prompt: str = DEFAULT_INITIAL_PROMPT
@@ -131,7 +137,7 @@ class Config:
     # ------------------------------------------------------------------ utils
     def normalize(self) -> None:
         """Привести значения к допустимым (после ручной правки JSON)."""
-        self.model = _pick(self.model, MODELS, "medium")
+        self.model = _pick(self.model, MODELS, "small")
         self.device = _pick(self.device, DEVICES, "auto")
         self.compute_type = _pick(self.compute_type, COMPUTE_TYPES, "auto")
         self.language = _pick(self.language, tuple(LANGUAGES), "auto")
@@ -143,7 +149,10 @@ class Config:
         self.hotwords = str(self.hotwords or "")
         self.input_device = str(self.input_device or "").strip()
 
-        self.beam_size = _clamp_int(self.beam_size, 1, 10, 5)
+        self.beam_size = _clamp_int(self.beam_size, 1, 10, 3)
+        self.stream_step = _clamp_float(self.stream_step, 0.2, 2.0, 0.45)
+        self.min_chunk_seconds = _clamp_float(self.min_chunk_seconds, 0.6, 5.0, 1.2)
+        self.hold_back_seconds = _clamp_float(self.hold_back_seconds, 0.0, 2.0, 0.5)
         self.sample_rate = _clamp_int(self.sample_rate, 8000, 48000, 16000)
         self.min_duration = _clamp_float(self.min_duration, 0.1, 10.0, 0.35)
         self.paste_delay = _clamp_float(self.paste_delay, 0.0, 2.0, 0.15)
@@ -176,7 +185,14 @@ def load_config(path: Path | None = None) -> tuple[Config, Path | None]:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("корневой элемент должен быть объектом")
-        return Config.from_dict(raw), None
+        config = Config.from_dict(raw)
+        if "streaming" not in raw:
+            # Конфиг от версии без потокового режима: там по умолчанию стояла
+            # тяжёлая модель medium, из-за неё запуск занимал десятки секунд.
+            config.streaming = True
+            config.model = "small"
+            config.beam_size = min(config.beam_size, 3)
+        return config, None
     except (json.JSONDecodeError, ValueError, TypeError, OSError):
         broken = path.with_name(f"config.broken-{time.strftime('%Y%m%d-%H%M%S')}.json")
         try:

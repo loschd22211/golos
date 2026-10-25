@@ -112,6 +112,30 @@ class FakeWidget:
     def winfo_viewable(self):
         return True
 
+    def winfo_x(self):
+        return 100
+
+    def winfo_y(self):
+        return 200
+
+    def winfo_screenwidth(self):
+        return 1920
+
+    def winfo_screenheight(self):
+        return 1080
+
+    def overrideredirect(self, value=True):
+        self.options["overrideredirect"] = value
+
+    def tk_popup(self, x, y):
+        self.options["popup"] = (x, y)
+
+    def tk_popover(self, *args, **kwargs):
+        return None
+
+    def resizable(self, width=None, height=None):
+        self.options["resizable"] = (width, height)
+
     def winfo_width(self):
         return 560
 
@@ -220,6 +244,8 @@ class FakeWindow(FakeWidget):
         self.visible = True
 
     def attributes(self, *args, **kwargs):
+        if args:
+            self.options[f"attr:{args[0]}"] = args[1] if len(args) > 1 else True
         return None
 
     def iconphoto(self, *args, **kwargs):
@@ -236,6 +262,24 @@ class FakeWindow(FakeWidget):
 
     def mainloop(self):
         self.mainloop_called = True
+
+
+class FakeMenu(FakeWidget):
+    def __init__(self, master=None, **options):
+        super().__init__(master, **options)
+        self.entries = []
+
+    def add_command(self, label="", command=None, **kwargs):
+        self.entries.append(("command", label, command))
+
+    def add_separator(self, **kwargs):
+        self.entries.append(("separator", None, None))
+
+    def add_cascade(self, label="", menu=None, **kwargs):
+        self.entries.append(("cascade", label, menu))
+
+    def tk_popup(self, x, y):
+        self.options["popup"] = (x, y)
 
 
 class FakeStyle:
@@ -283,6 +327,8 @@ def build() -> tuple[types.ModuleType, types.ModuleType, types.ModuleType]:
     tk.Button = FakeWidget
     tk.Entry = FakeWidget
     tk.Spinbox = FakeWidget
+    tk.Checkbutton = FakeWidget
+    tk.Menu = FakeMenu
     tk.Text = FakeText
     tk.Canvas = FakeCanvas
     tk.PhotoImage = lambda *a, **k: object()

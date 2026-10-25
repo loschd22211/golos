@@ -10,15 +10,19 @@ def test_defaults_are_valid():
     assert cfg.language == "auto"
     assert cfg.model in ("tiny", "base", "small", "medium", "large-v3")
     assert cfg.insert_method == "paste"
+    assert cfg.streaming is True
+    assert cfg.model == "small"
 
 
 def test_normalize_fixes_bad_values():
     cfg = Config(model="huge", device="tpu", language="fr", insert_method="x",
                  beam_size=99, sample_rate=1, paste_delay=-5)
-    assert cfg.model == "medium"
+    assert cfg.model == "small"
     assert cfg.device == "auto"
     assert cfg.language == "auto"
     assert cfg.insert_method == "paste"
+    assert cfg.streaming is True
+    assert cfg.model == "small"
     assert cfg.beam_size == 10
     assert cfg.sample_rate == 8000
     assert cfg.paste_delay == 0.0
@@ -47,7 +51,7 @@ def test_json_contains_cyrillic_not_escaped(tmp_path: Path):
 def test_missing_file_returns_defaults(tmp_path: Path):
     cfg, broken = load_config(tmp_path / "nope.json")
     assert broken is None
-    assert cfg.model == "medium"
+    assert cfg.model == "small"
 
 
 def test_broken_file_is_backed_up(tmp_path: Path):

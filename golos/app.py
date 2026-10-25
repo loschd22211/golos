@@ -18,6 +18,7 @@ from .config import AppPaths, Config, save_config
 from .hotkeys import HotkeyManager, normalize_hotkey
 from .inject import InjectionError, TextInjector
 from .system import beep, set_autostart
+from .streaming import StreamingDictator
 from .textproc import clean_text, preview
 from .transcribe import TranscriptionError, WhisperTranscriber
 
@@ -114,6 +115,19 @@ class DictationApp:
         self.started_at = time.time()
         self.paused = False
 
+        self.focus_hook = lambda: None  # оверлей подставит возврат фокуса
+        self.stream = StreamingDictator(
+            recorder=self.recorder,
+            transcriber=self.transcriber,
+            injector=self.injector,
+            config=self.config,
+            on_text=self._on_stream_text,
+            on_state=self._on_stream_state,
+            on_error=self._on_stream_error,
+            on_partial=self._on_stream_partial,
+            focus_restore=lambda: self.focus_hook(),
+        )
+
         self._work_lock = threading.Lock()  # одна обработка за раз
         self._preload_thread: threading.Thread | None = None
         self._preload = preload
@@ -131,6 +145,8 @@ class DictationApp:
     def stop(self) -> None:
         self._stop_event.set()
         try:
+            if self.stream.is_active:
+                self.stream.cancel()
             if self.recorder.is_recording:
                 self.recorder.cancel()
         finally:
@@ -180,12 +196,40 @@ class DictationApp:
             beep("start")
         self._set_state(RECORDING)
         self._start_level_poll()
+
+        if self.config.streaming:
+            self.stream.config = self.config
+            self.last_text = ""  # каждый сеанс начинается с чистого листа
+            self.stream.start()
         return True
 
     def stop_recording(self) -> None:
         if not self.recorder.is_recording:
             return
         self._unregister_cancel_hotkey()
+
+        if self.config.streaming and self.stream.is_active:
+            self._set_state(PROCESSING)
+            text = self.stream.stop()
+            recording = self.recorder.stop()
+            if self.config.sound_feedback:
+                beep("stop")
+            duration = recording.duration if recording else 0.0
+            if text.strip():
+                self.last_text = text
+                self._append_history(text)
+                self._update_stats(text, duration, 0.0)
+                if self.config.notifications:
+                    self.ui.on_notify("Голос", preview(text))
+            elif duration < self.config.min_duration or not recording:
+                self.ui.on_notify("Голос", "Слишком короткая запись")
+            else:
+                self.ui.on_notify(
+                    "Голос", "Речь не распознана — проверьте микрофон и модель"
+                )
+            self._set_state(IDLE)
+            return
+
         recording = self.recorder.stop()
         if self.config.sound_feedback:
             beep("stop")
@@ -218,6 +262,8 @@ class DictationApp:
         if not self.recorder.is_recording:
             return
         self._unregister_cancel_hotkey()
+        if self.stream.is_active:
+            self.stream.cancel()
         self.recorder.cancel()
         if self.config.sound_feedback:
             beep("stop")
@@ -229,6 +275,8 @@ class DictationApp:
         self.paused = bool(value) if value is not None else not self.paused
         if self.paused:
             if self.recorder.is_recording:
+                if self.stream.is_active:
+                    self.stream.cancel()
                 self.recorder.cancel()
                 self._unregister_cancel_hotkey()
             self.hotkeys.unregister_all()
@@ -362,6 +410,7 @@ class DictationApp:
             self.recorder.set_config(new)
             self.transcriber.set_config(new)
             self.injector.apply_config(new)
+            self.stream.config = new
 
             if persist:
                 try:
@@ -427,6 +476,23 @@ class DictationApp:
                 time.sleep(0.05)
 
         threading.Thread(target=poll, name="golos-level", daemon=True).start()
+
+    # ------------------------------------------------------- колбэки потока
+    def _on_stream_text(self, text: str) -> None:
+        self.last_text += text
+        self.ui.on_text(text, text)
+
+    def _on_stream_partial(self, text: str) -> None:
+        handler = getattr(self.ui, "on_partial", None)
+        if handler:
+            handler(text)
+
+    def _on_stream_state(self, state: str, message: str = "") -> None:
+        if state == "loading":
+            self.ui.on_state(LOADING, message or "Загружаю модель…")
+
+    def _on_stream_error(self, message: str) -> None:
+        self._fail(message)
 
     def _set_state(self, state: str, message: str = "") -> None:
         self.state = state

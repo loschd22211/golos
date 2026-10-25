@@ -144,6 +144,52 @@ class WhisperTranscriber:
             log.info("Модель готова: %s/%s", device, compute_type)
             return model
 
+    def segments(
+        self,
+        audio,
+        config: Config | None = None,
+        initial_prompt: str | None = None,
+        beam_size: int | None = None,
+    ) -> list[dict]:
+        """Распознать кусок аудио и вернуть сегменты с таймингами.
+
+        Нужно потоковому режиму: по времени окончания сегмента решаем, что уже
+        можно вставлять в поле ввода, а что ещё рано (слово может недоговориться).
+        """
+        cfg = config or self.config
+        if audio is None or getattr(audio, "size", 0) == 0:
+            return []
+
+        model = self._ensure_model()
+        language = None if cfg.language == "auto" else cfg.language
+        params = {
+            "task": "transcribe",
+            "language": language,
+            "beam_size": int(beam_size or 1),
+            "vad_filter": False,
+            "condition_on_previous_text": False,
+            "without_timestamps": False,
+            "word_timestamps": False,
+            "initial_prompt": initial_prompt or cfg.initial_prompt or None,
+            "hotwords": cfg.hotwords or None,
+        }
+
+        with self._lock:
+            pieces, _info = model.transcribe(audio, **params)
+            result = []
+            for segment in pieces:
+                piece = (segment.text or "").strip()
+                if not piece:
+                    continue
+                result.append(
+                    {
+                        "text": piece,
+                        "start": float(getattr(segment, "start", 0.0) or 0.0),
+                        "end": float(getattr(segment, "end", 0.0) or 0.0),
+                    }
+                )
+        return result
+
     # -------------------------------------------------------------- transcribe
     def transcribe(self, audio, config: Config | None = None) -> TranscriptionResult:
         cfg = config or self.config

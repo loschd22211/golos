@@ -125,6 +125,7 @@ def pipeline(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "faster_whisper", fw)
 
     config = Config()
+    config.streaming = False  # сквозной тест одиночного режима
     config.sound_feedback = False
     config.notifications = False
     config.preload_model = False

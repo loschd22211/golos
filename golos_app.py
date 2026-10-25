@@ -20,11 +20,12 @@ import threading
 from pathlib import Path
 
 from golos import APP_NAME, APP_TITLE, __version__
-from golos.app import DictationApp, NullUi
+from golos.app import ERROR, DictationApp, NullUi
 from golos.config import AppPaths, load_config
 from golos.logsetup import setup_logging
 from golos.hotkeys import pretty_hotkey
 from golos.system import SingleInstance, open_path, show_message
+from golos import winfocus
 
 log = logging.getLogger("golos")
 
@@ -65,25 +66,31 @@ class GuiBridge:
                 log.exception("Ошибка обработки события %s", kind)
 
     def _dispatch(self, kind: str, payload: tuple) -> None:
+        window = self.window
         if kind == "state":
             state, message = payload
             if self.tray:
                 self.tray.update_state(state, message)
-            if self.window:
-                self.window.update_state(state, message)
+            if window:
+                window.set_state(state, message)
         elif kind == "level":
             if self.tray:
                 self.tray.update_level(payload[0])
-            if self.window and self.window.is_visible():
-                self.window.update_level(payload[0])
+            if window:
+                window.set_level(payload[0])
+        elif kind == "partial":
+            if window:
+                window.set_partial(payload[0])
         elif kind == "text":
             text, _raw = payload
-            if self.window:
-                self.window.set_last_text(text)
+            if window:
+                window.set_last(text)
         elif kind == "error":
             message = payload[0]
             if self.tray:
-                self.tray.notify("Голос — ошибка", message[:220])
+                self.tray.notify("Голос — ошибка", message[:200])
+            if window:
+                window.set_state(ERROR, message[:120])
         elif kind == "notify":
             title, message = payload
             if self.tray:
@@ -98,6 +105,9 @@ class GuiBridge:
 
     def on_text(self, text: str, raw: str = "") -> None:
         self.queue.put(("text", (text, raw)))
+
+    def on_partial(self, text: str) -> None:
+        self.queue.put(("partial", (text,)))
 
     def on_error(self, message: str) -> None:
         self.queue.put(("error", (message,)))
@@ -130,7 +140,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Офлайн-диктовка: говорите — текст появляется в любом поле ввода.",
     )
     parser.add_argument("--show", "--settings", dest="show", action="store_true",
-                        help="сразу открыть окно программы")
+                        help="показать плашку (по умолчанию она и так показывается)")
     parser.add_argument("--silent", action="store_true",
                         help="запуск в фоне: без консоли и без окна (для автозапуска)")
     parser.add_argument("--no-tray", action="store_true", help="не создавать иконку в трее")
@@ -227,17 +237,16 @@ def _run_console(app: DictationApp, single: SingleInstance) -> int:
 def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance) -> int:
     import tkinter as tk
 
+    from golos.overlay import Overlay
     from golos.tray import create_tray
-    from golos.ui import MainWindow
 
     root = tk.Tk()
-    root.withdraw()
 
     bridge = GuiBridge(root)
     app.ui = bridge
 
-    window = MainWindow(root, app)
-    bridge.window = window
+    overlay = Overlay(root, app, on_quit=lambda: None)
+    bridge.window = overlay
 
     def quit_app() -> None:
         log.info("Завершение по команде пользователя")
@@ -255,34 +264,60 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
                 pass
             single.release()
 
+    overlay.on_quit = quit_app
+
     tray = create_tray(
         app,
-        on_open=lambda: bridge.post(window.show),
+        on_open=lambda: bridge.post(overlay.show),
         on_quit=quit_app,
         on_history=lambda: bridge.post(lambda: open_path(app.paths.history_file)),
-        on_show_log=lambda: bridge.post(lambda: open_path(app.paths.log_file)),
+        on_show_log=lambda: bridge.post(overlay.open_log),
         on_open_config=lambda: bridge.post(lambda: open_path(app.paths.data_dir)),
     )
     bridge.tray = tray
 
+    # Возврат фокуса тому окну, где стоял курсор, перед каждой вставкой.
+    target = {"hwnd": None}
+
+    def remember_target() -> None:
+        hwnd = winfocus.get_foreground_window()
+        if hwnd:
+            target["hwnd"] = hwnd
+
+    def restore_target() -> None:
+        if target["hwnd"]:
+            winfocus.restore_foreground_window(target["hwnd"])
+
+    app.focus_hook = restore_target
+    # Запоминаем активное окно в момент старта диктовки (клик по оверлею
+    # фокус не забирает, но подстрахуемся, если это всё же случилось).
+    original_toggle = app.toggle
+
+    def toggle_with_target() -> None:
+        if not app.is_recording:
+            remember_target()
+        original_toggle()
+
+    app.toggle = toggle_with_target
+
     def poll_events() -> None:
         bridge.pump()
-        root.after(70, poll_events)
+        root.after(60, poll_events)
 
-    root.after(70, poll_events)
+    root.after(60, poll_events)
 
     app.start()
     tray.start()
 
-    first_run = not app.transcriber.is_model_downloaded()
-    # При обычном запуске окно показываем всегда: иначе непонятно, случилось ли
-    # что-то вообще (иконка в Windows 11 часто прячется в «^»).
-    if not args.silent:
-        root.after(300, window.show)
-    if first_run:
-        log.info("Модель ещё не скачана — она загрузится при первом распознавании")
+    if args.silent:
+        overlay.hide()
+    else:
+        overlay.show()
 
-    log.info("Интерфейс запущен")
+    if not app.transcriber.is_model_downloaded():
+        bridge.on_notify("Голос", "Модель скачается при первой диктовке (один раз)")
+
+    log.info("Оверлей запущен")
     try:
         root.mainloop()
     except KeyboardInterrupt:  # pragma: no cover
@@ -290,5 +325,37 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
     return 0
 
 
+def run() -> int:
+    """Обёртка с «покажи ошибку, что бы ни случилось».
+
+    У ``pythonw.exe`` нет консоли: без этого любая ошибка запуска выглядела как
+    «щёлкнул — и ничего не произошло». Теперь текст ошибки попадает и в журнал,
+    и в окно сообщения.
+    """
+    try:
+        return main()
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - показываем пользователю всё
+        import traceback
+
+        details = traceback.format_exc()
+        try:
+            paths = AppPaths.default().ensure()
+            setup_logging(paths.log_file, "DEBUG", console=False)
+            log.error("Критическая ошибка:\n%s", details)
+            target = paths.log_file
+        except Exception:  # pragma: no cover
+            target = "журнал недоступен"
+        show_message(
+            APP_TITLE,
+            "«Голос» не смог запуститься.\n\n"
+            f"{type(exc).__name__}: {exc}\n\n"
+            f"Подробности: {target}\n\n"
+            "Запустите .\\doctor.bat — он соберёт диагностику.",
+        )
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())

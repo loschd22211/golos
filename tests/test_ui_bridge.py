@@ -44,11 +44,24 @@ class FakeWindow:
     def update_state(self, state, message=""):
         self.states.append((state, message))
 
-    def update_level(self, level):
+    def set_level(self, level):
         self.levels.append(level)
+
+    def set_text(self, text, raw=""):
+        self.texts.append(text)
+
+    # старые имена — на случай, если интерфейс их ещё использует
+    def set_last(self, text):
+        self.texts.append(text)
 
     def set_last_text(self, text):
         self.texts.append(text)
+
+    def set_partial(self, text):
+        self.partials = getattr(self, "partials", []) + [text]
+
+    def set_state(self, state, message=""):
+        self.states.append((state, message))
 
 
 def make_bridge():
@@ -58,7 +71,7 @@ def make_bridge():
     return bridge
 
 
-def test_events_reach_tray_and_window():
+def test_overlay_api_is_used():
     bridge = make_bridge()
 
     bridge.on_state(RECORDING, "Слушаю…")
@@ -72,22 +85,25 @@ def test_events_reach_tray_and_window():
     assert bridge.tray.levels == [0.4]
     assert ("Голос — ошибка", "нет доступа") in bridge.tray.notifications
     assert ("Голос", "готово") in bridge.tray.notifications
-    assert bridge.window.states == [(RECORDING, "Слушаю…")]
+    assert (RECORDING, "Слушаю…") in bridge.window.states
+    assert any(state == "error" for state, _ in bridge.window.states)
     assert bridge.window.levels == [0.4]
     assert bridge.window.texts == ["Привет "]
 
 
-def test_hidden_window_skips_level_updates():
+def test_partial_text_reaches_overlay():
     bridge = make_bridge()
-    bridge.window.visible = False
-    bridge.on_state(IDLE, "Готов")
-    bridge.on_level(0.3)
-    bridge.on_text("x")
+    bridge.on_partial("как де")
     bridge.pump()
-    assert bridge.window.states == [(IDLE, "Готов")]
-    assert bridge.window.levels == []
-    assert bridge.window.texts == ["x"]
-    assert bridge.tray.states == [(IDLE, "Готов")]
+    assert bridge.window.partials == ["как де"]
+
+
+def test_errors_are_shown_in_overlay():
+    bridge = make_bridge()
+    bridge.on_error("микрофон не найден")
+    bridge.pump()
+    assert any(state == "error" for state, _ in bridge.window.states)
+    assert ("Голос — ошибка", "микрофон не найден") in bridge.tray.notifications
 
 
 def test_no_tray_does_not_crash():

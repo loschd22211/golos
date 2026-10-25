@@ -189,6 +189,26 @@ class MicrophoneRecorder:
         log.info("Запись остановлена: %.2f c, пик %.3f", duration, peak)
         return Recording(audio, int(self.config.sample_rate), duration, peak)
 
+    def snapshot(self):
+        """Текущее аудио с начала записи (копия, 16 кГц mono float32).
+
+        Нужно для потокового распознавания: пока идёт запись, движок время от
+        времени забирает накопленный звук и распознаёт его по кускам.
+        """
+        np = getattr(self, "_np", None)
+        if np is None:
+            return None
+        with self._lock:
+            chunks = list(self._chunks)
+            rate = self._device_rate
+        if not chunks:
+            return None
+        audio = np.concatenate(chunks, axis=0).reshape(-1).astype(np.float32, copy=False)
+        target = int(self.config.sample_rate or 16000)
+        if rate != target:
+            audio = self._resample(audio, rate, target)
+        return audio
+
     def cancel(self) -> None:
         """Прервать запись, ничего не сохраняя."""
         with self._lock:

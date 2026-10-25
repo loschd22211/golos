@@ -157,6 +157,7 @@ class RecordingUi:
 
 def make_app(tmp_path, recorder=None, transcriber=None, injector=None, ui=None, **cfg):
     config = Config(**cfg)
+    config.streaming = False  # здесь проверяется одиночный режим (запись → стоп)
     config.trailing_space = True
     config.sound_feedback = False
     config.notifications = False
@@ -312,6 +313,7 @@ def test_apply_config_persists(tmp_path):
 def test_apply_config_reloads_model_and_rebinds(tmp_path):
     transcriber = FakeTranscriber()
     config = Config()
+    config.streaming = False
     config.sound_feedback = False
     config.notifications = False
     app = DictationApp(
@@ -329,7 +331,7 @@ def test_apply_config_reloads_model_and_rebinds(tmp_path):
     assert transcriber.is_ready
 
     new_cfg = app.config.copy()
-    new_cfg.model = "small"
+    new_cfg.model = "base"
     app.apply_config(new_cfg)
     assert wait_for(lambda: transcriber.preloaded == 2)
     app.stop()
@@ -353,7 +355,7 @@ def test_status_dict(tmp_path):
     status = app.status()
     assert status["hotkey"] == "ctrl+alt+space"
     assert status["state"] == IDLE
-    assert status["model"] == "medium"
+    assert status["model"] == "small"
     assert status["config_file"].endswith("config.json")
 
 
