@@ -1,0 +1,8 @@
+# Windows-скрипты должны иметь CRLF, иначе cmd.exe неправильно читает goto/метки
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.ico   binary
+*.png   binary

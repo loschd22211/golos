@@ -9,6 +9,8 @@
 #   3. ставит зависимости (faster-whisper, sounddevice, keyboard, pystray…);
 #   4. создаёт ярлык «Голос» на рабочем столе и в меню «Пуск».
 
+param([switch]$Quiet)   # -Quiet: без пауз в конце (используется из run.bat)
+
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
@@ -39,8 +41,8 @@ if (-not $pyCmd) {
     Write-Host ""
     Write-Host "Скачайте Python с https://www.python.org/downloads/windows/" -ForegroundColor Yellow
     Write-Host "При установке обязательно отметьте галочку 'Add python.exe to PATH'." -ForegroundColor Yellow
-    Write-Host "Затем запустите install.bat заново." -ForegroundColor Yellow
-    Read-Host "`nНажмите Enter для выхода"
+    Write-Host "Затем запустите run.bat заново." -ForegroundColor Yellow
+    if (-not $Quiet) { Read-Host "`nНажмите Enter для выхода" }
     exit 1
 }
 & cmd /c "$pyCmd --version"
@@ -52,7 +54,7 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
     & cmd /c "$pyCmd -m venv `".venv`""
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "Не удалось создать venv. Попробуйте: $pyCmd -m venv .venv"
-        Read-Host "Нажмите Enter для выхода"
+        if (-not $Quiet) { Read-Host "Нажмите Enter для выхода" }
         exit 1
     }
     Write-Ok "Окружение создано"
@@ -67,8 +69,8 @@ Write-Step "Устанавливаю зависимости (это займёт
 & cmd /c "`"$venvPython`" -m pip install --upgrade pip --quiet"
 & cmd /c "`"$venvPython`" -m pip install -r `"$root\requirements.txt`""
 if ($LASTEXITCODE -ne 0) {
-    Write-Warn "Установка зависимостей не удалась. Проверьте интернет и запустите install.bat снова."
-    Read-Host "Нажмите Enter для выхода"
+    Write-Warn "Установка зависимостей не удалась. Проверьте интернет и запустите run.bat снова."
+    if (-not $Quiet) { Read-Host "Нажмите Enter для выхода" }
     exit 1
 }
 Write-Ok "Зависимости установлены"
@@ -106,7 +108,8 @@ Write-Host "`nГотово!" -ForegroundColor Green
 Write-Host @"
 
 Как пользоваться:
-  1. Запустите «Голос» (ярлык на рабочем столе). В трее появится иконка микрофона.
+  0. Запуск: .\run.bat (или ярлык «Голос» на рабочем столе).
+  1. В трее появится иконка микрофона.
   2. Поставьте курсор в любое поле ввода (браузер, Word, Telegram, VS Code…).
   3. Нажмите Ctrl+Alt+Space и говорите. Нажмите ещё раз — текст появится.
      Esc во время записи — отмена.
@@ -119,4 +122,4 @@ Write-Host @"
 
 "@ -ForegroundColor Gray
 
-Read-Host "Нажмите Enter для выхода"
+if (-not $Quiet) { Read-Host "Нажмите Enter для выхода" }
