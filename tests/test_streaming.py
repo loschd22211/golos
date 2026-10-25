@@ -361,3 +361,40 @@ def test_force_commit_keeps_last_word_for_partial():
     inserted = events["text"][0].lower()
     assert "друг" not in inserted
     assert "привет" in inserted
+
+
+def test_injection_error_stops_the_session():
+    """Нет прав на вставку — ошибка показывается один раз, а не каждые 0.35 с."""
+    from golos.inject import InjectionError
+
+    errors = []
+
+    class FailingInjector:
+        def __init__(self):
+            self.calls = 0
+
+        def insert(self, text):
+            self.calls += 1
+            raise InjectionError("активное окно запущено от администратора")
+
+    import numpy as np
+
+    transcriber = WordTranscriber()
+    injector = FailingInjector()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=transcriber,
+        injector=injector,
+        config=Config(),
+        on_error=errors.append,
+    )
+
+    # три куска речи подряд: без флага было бы три одинаковые ошибки
+    for _ in range(3):
+        if stream._fatal:
+            break
+        stream._process_tail(np.zeros(16000 * 3, dtype=np.float32), final=False)
+
+    assert injector.calls == 1
+    assert len(errors) == 1
+    assert "администратора" in errors[0]

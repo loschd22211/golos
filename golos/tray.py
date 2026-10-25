@@ -151,6 +151,12 @@ class TrayIcon(NullTray):
             MenuItem("Открыть журнал", self._menu_log),
             MenuItem("Папка настроек", self._menu_folder),
             Menu.SEPARATOR,
+            MenuItem(
+                "Перезапустить от администратора",
+                self._menu_restart_admin,
+                visible=not getattr(self.app, "admin", False),
+            ),
+            Menu.SEPARATOR,
             MenuItem("Выход", self._menu_quit),
         )
 
@@ -176,6 +182,18 @@ class TrayIcon(NullTray):
 
     def _menu_folder(self, icon, item) -> None:
         self.on_open_config()
+
+    def _menu_restart_admin(self, icon, item) -> None:
+        """Поднять права: без них текст не попадает в админские окна."""
+        from . import elevate
+
+        try:
+            icon.stop()
+        except Exception:  # pragma: no cover
+            pass
+        self.on_quit()
+        if not elevate.relaunch_as_admin():
+            log.info("Перезапуск от администратора не удался — работаю как есть")
 
     def _menu_quit(self, icon, item) -> None:
         self.on_quit()

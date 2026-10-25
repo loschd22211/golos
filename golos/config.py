@@ -128,6 +128,10 @@ class Config:
     sound_feedback: bool = True
     notifications: bool = True
     autostart: bool = False
+    # Права администратора: без них Windows не пускает текст в окна, которые
+    # запущены от администратора (частая история с браузером). Приложение
+    # само попросит UAC при запуске — отключается здесь или ключом --no-admin.
+    run_as_admin: bool = True
     preload_model: bool = True
     history_enabled: bool = True
     log_level: str = "INFO"
@@ -158,6 +162,7 @@ class Config:
         self.sample_rate = _clamp_int(self.sample_rate, 8000, 48000, 16000)
         self.min_duration = _clamp_float(self.min_duration, 0.1, 10.0, 0.35)
         self.paste_delay = _clamp_float(self.paste_delay, 0.0, 2.0, 0.15)
+        self.run_as_admin = _as_bool(self.run_as_admin, True)
         self.replacements = _clean_replacements(self.replacements)
 
     def to_dict(self) -> dict[str, Any]:
@@ -220,6 +225,20 @@ def save_config(config: Config, path: Path | None = None) -> Path:
 def _pick(value: Any, allowed: tuple[str, ...], fallback: str) -> str:
     value = str(value or "").strip().lower()
     return value if value in allowed else fallback
+
+
+def _as_bool(value: Any, fallback: bool) -> bool:
+    """Из JSON приходит true/false, но люди пишут и "да"/"0"/"false"."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return fallback
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on", "да", "истина"):
+        return True
+    if text in ("0", "false", "no", "off", "нет", "ложь", ""):
+        return False
+    return fallback
 
 
 def _clamp_int(value: Any, low: int, high: int, fallback: int) -> int:

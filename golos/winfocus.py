@@ -140,3 +140,80 @@ def top_window_at_cursor() -> int | None:  # pragma: no cover - только Win
         return int(_user32().WindowFromPoint(point))
     except Exception:
         return None
+
+
+def window_pid(hwnd: int | None) -> int | None:
+    """PID процесса, которому принадлежит окно."""
+    if not _IS_WINDOWS or not hwnd:  # pragma: no cover
+        return None
+    try:
+        import ctypes
+
+        pid = ctypes.c_ulong(0)
+        _user32().GetWindowThreadProcessId(int(hwnd), ctypes.byref(pid))
+        return int(pid.value) or None
+    except Exception as exc:  # pragma: no cover
+        log.debug("GetWindowThreadProcessId не сработал: %s", exc)
+        return None
+
+
+def window_title(hwnd: int | None) -> str:
+    """Заголовок окна (для журнала — куда именно уходит текст)."""
+    if not _IS_WINDOWS or not hwnd:  # pragma: no cover
+        return ""
+    try:
+        import ctypes
+
+        length = _user32().GetWindowTextLengthW(int(hwnd))
+        buffer = ctypes.create_unicode_buffer(length + 2)
+        _user32().GetWindowTextW(int(hwnd), buffer, length + 2)
+        return buffer.value
+    except Exception as exc:  # pragma: no cover
+        log.debug("GetWindowTextW не сработал: %s", exc)
+        return ""
+
+
+def process_exe(pid: int | None) -> str:
+    """Имя exe процесса по PID (например, chrome.exe)."""
+    if not _IS_WINDOWS or not pid:  # pragma: no cover
+        return ""
+    handle = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ""
+        size = ctypes.c_ulong(1024)
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(
+            handle, 0, buffer, ctypes.byref(size)
+        ):
+            return ""
+        return buffer.value.rsplit("\\", 1)[-1]
+    except Exception as exc:  # pragma: no cover
+        log.debug("QueryFullProcessImageNameW не сработал: %s", exc)
+        return ""
+    finally:
+        if handle:  # pragma: no cover
+            try:
+                import ctypes
+
+                ctypes.windll.kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+
+
+def foreground_info() -> dict | None:
+    """Всё про активное окно: hwnd, pid, заголовок, exe."""
+    hwnd = get_foreground_window()
+    if not hwnd:
+        return None
+    pid = window_pid(hwnd)
+    return {
+        "hwnd": hwnd,
+        "pid": pid,
+        "title": window_title(hwnd),
+        "exe": process_exe(pid),
+    }

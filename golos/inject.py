@@ -31,6 +31,7 @@ class Clipboard(Protocol):
 class Keyboard(Protocol):
     def send(self, combination: str) -> None: ...
     def write(self, text: str, delay: float = 0.0) -> None: ...
+    def paste(self) -> None: ...
 
 
 # --------------------------------------------------------------- Windows impls
@@ -81,6 +82,30 @@ class SystemKeyboard:
         except Exception as exc:
             raise InjectionError(f"Не удалось отправить {combination}: {exc}") from exc
 
+    def paste(self) -> None:
+        """Ctrl+V с паузой между нажатиями.
+
+        ``keyboard.send("ctrl+v")`` жмёт модификатор и клавишу одновременно,
+        и часть приложений (браузеры, Electron) такое нажатие не видит.
+        Пошаговое нажатие с задержкой работает заметно надёжнее.
+        """
+        lib = self._lib()
+        try:
+            if hasattr(lib, "press") and hasattr(lib, "release"):
+                lib.press("ctrl")
+                try:
+                    time.sleep(0.03)
+                    lib.press("v")
+                    time.sleep(0.03)
+                    lib.release("v")
+                    time.sleep(0.03)
+                finally:
+                    lib.release("ctrl")
+            else:  # pragma: no cover - очень старые версии библиотеки
+                lib.send("ctrl+v")
+        except Exception as exc:
+            raise InjectionError(f"Не удалось отправить Ctrl+V: {exc}") from exc
+
     def write(self, text: str, delay: float = 0.0) -> None:
         try:
             self._lib().write(text, delay=delay)
@@ -101,8 +126,12 @@ class TextInjector:
         clipboard: Clipboard | None = None,
         keyboard: Keyboard | None = None,
         sleep=time.sleep,
+        guard=None,
     ):
         self.method = method
+        # Проверка перед вставкой: например, права окна-получателя.
+        # Может бросить InjectionError, тогда текст не потеряется молча.
+        self.guard = guard
         self.restore_clipboard = restore_clipboard
         self.paste_delay = paste_delay
         self.restore_delay = restore_delay
@@ -120,6 +149,8 @@ class TextInjector:
         """Вставить текст. Возвращает False для пустой строки."""
         if not text or not text.strip():
             return False
+        if self.guard is not None:
+            self.guard()
         if self.method == "type":
             return self._type(text)
         return self._paste(text)
@@ -141,7 +172,11 @@ class TextInjector:
         try:
             if self.paste_delay:
                 self._sleep(self.paste_delay)
-            self.keyboard.send("ctrl+v")
+            paste = getattr(self.keyboard, "paste", None)
+            if paste is not None:
+                paste()
+            else:  # pragma: no cover - клавиатуры без paste (тесты, старый код)
+                self.keyboard.send("ctrl+v")
         except InjectionError as exc:
             log.warning("Ctrl+V не сработал (%s), печатаю посимвольно", exc)
             self._restore(previous)

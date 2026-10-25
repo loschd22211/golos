@@ -72,6 +72,7 @@ class StreamingDictator:
         self._lock = threading.Lock()
         self._first_chunk = True
         self._last_error = ""
+        self._fatal = False          # вставка невозможна: сеанс прекращаем
         self.chunks_inserted = 0
 
     # ------------------------------------------------------------------ state
@@ -100,6 +101,7 @@ class StreamingDictator:
         self.chunks_inserted = 0
         self._first_chunk = True
         self._last_error = ""
+        self._fatal = False
         self._thread = threading.Thread(target=self._run, name="golos-stream", daemon=True)
         self._thread.start()
         log.info(
@@ -139,7 +141,7 @@ class StreamingDictator:
         min_chunk = max(0.4, float(getattr(cfg, "min_chunk_seconds", 0.8)))
 
         try:
-            while not self._stop.is_set():
+            while not self._stop.is_set() and not self._fatal:
                 if self._stop.wait(step):
                     break
                 audio = self.recorder.snapshot()
@@ -248,6 +250,9 @@ class StreamingDictator:
                 self.focus_restore()
                 self.injector.insert(text)
             except InjectionError as exc:
+                # Нет прав / ввод заблокирован: повторять каждые 0.35 с
+                # бессмысленно — иначе лавина одинаковых ошибок.
+                self._fatal = True
                 self._fail(str(exc))
                 return
             with self._lock:

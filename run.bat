@@ -31,11 +31,19 @@ if not errorlevel 1 goto already_running
 
 start "" ".venv\Scripts\pythonw.exe" "golos_app.py" %*
 echo   Запускаю...
-ping -n 3 127.0.0.1 >nul 2>&1
-
+echo   Если Windows спросит разрешение (UAC) - нажмите "Да": с правами
+echo   администратора текст вставляется в любые окна, включая браузер.
+echo.
+set tries=0
+:wait_start
+ping -n 2 127.0.0.1 >nul 2>&1
 ".venv\Scripts\python.exe" "golos_app.py" --status >nul 2>&1
-if errorlevel 1 goto launch_failed
+if not errorlevel 1 goto ready
+set /a tries+=1
+if %tries% lss 20 goto wait_start
+goto launch_failed
 
+:ready
 echo.
 echo   Готово: «Голос» работает.
 echo     - плашка с микрофоном — внизу справа;

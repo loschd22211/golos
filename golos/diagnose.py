@@ -200,6 +200,33 @@ def check_gpu(config) -> bool:
         return False
 
 
+def check_rights() -> bool:
+    """Права администратора: от них зависит, куда вообще попадёт текст."""
+    section("Права администратора")
+    try:
+        from golos import elevate
+
+        admin = elevate.is_admin()
+    except Exception as exc:  # pragma: no cover
+        say(WARN, "не удалось проверить права", str(exc))
+        return False
+
+    if admin:
+        say(OK, "запущено от администратора", "текст вставляется в любые окна")
+        return True
+
+    say(
+        WARN,
+        "запущено без прав администратора",
+        "в окна от администратора (часто браузер) Windows ввод не пропустит",
+    )
+    print("     Тогда плашка писала «вставлено», а текст не появлялся.")
+    print("     Решение: правый клик по иконке в трее → "
+          "«Перезапустить от администратора»,")
+    print("     либо запустить .\\run.bat и согласиться на запрос UAC.")
+    return False
+
+
 def check_packages() -> None:
     section("Пакеты")
     required = ("faster_whisper", "sounddevice", "numpy", "keyboard", "pyperclip")
@@ -550,6 +577,7 @@ def main(argv: list[str] | None = None) -> int:
     check_environment(root)
     check_code_version(root)
     config, raw = check_config(appdata)
+    check_rights()
     check_packages()
     cuda_ok = check_gpu(config)
     if args.fix:

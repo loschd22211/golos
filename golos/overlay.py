@@ -352,7 +352,7 @@ class SettingsDialog:
         self.win = tk.Toplevel(parent)
         self.win.title(f"{APP_TITLE} — настройки")
         self.win.configure(bg=BG)
-        self.win.geometry("460x380")
+        self.win.geometry("460x420")
         self.win.resizable(False, False)
         try:
             winfocus.clear_no_activate(self.win)
@@ -365,6 +365,7 @@ class SettingsDialog:
         self.mic = tk.StringVar(value=cfg.input_device or "Системный по умолчанию")
         self.hotkey = tk.StringVar(value=cfg.hotkey)
         self.autostart = tk.BooleanVar(value=cfg.autostart)
+        self.admin_rights = tk.BooleanVar(value=getattr(cfg, "run_as_admin", True))
         self.sound = tk.BooleanVar(value=cfg.sound_feedback)
 
         self._build()
@@ -408,6 +409,20 @@ class SettingsDialog:
                 command=self.apply,
             ).grid(row=5, column=index, sticky="w", padx=14, pady=4)
 
+        # Без прав администратора Windows не пускает текст в админские окна.
+        tk.Checkbutton(
+            form,
+            text="Права администратора (нужны для окон, запущенных от админа)",
+            variable=self.admin_rights,
+            bg=BG,
+            fg=TEXT,
+            selectcolor="#1c2333",
+            activebackground=BG,
+            activeforeground=TEXT,
+            font=_font(9),
+            command=self.apply,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=14, pady=4)
+
         buttons = tk.Frame(self.win, bg=BG)
         buttons.pack(fill="x", padx=14, pady=12)
         tk.Button(buttons, text="Готово", command=self.save, bg=ACCENT, fg=WHITE,
@@ -431,6 +446,7 @@ class SettingsDialog:
         cfg.hotkey = self.hotkey.get().strip() or cfg.hotkey
         cfg.autostart = bool(self.autostart.get())
         cfg.sound_feedback = bool(self.sound.get())
+        cfg.run_as_admin = bool(self.admin_rights.get())
         cfg.normalize()
         return cfg
 
