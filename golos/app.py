@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from . import elevate
 from .audio import AudioError, MicrophoneRecorder, Recording
 from .config import AppPaths, Config, save_config
 from .hotkeys import HotkeyManager, normalize_hotkey
@@ -104,6 +105,15 @@ class DictationApp:
             self.config.restore_clipboard,
             self.config.paste_delay,
         )
+        # Перед каждой вставкой проверяем, что окно-получатель вообще примет
+        # наш ввод, и пишем в журнал, куда уходит текст. Без этого Windows
+        # молча выбрасывала нажатия, а плашка бодро писала «вставлено».
+        if getattr(self.injector, "guard", None) is None:
+            try:
+                self.injector.guard = elevate.insertion_guard
+            except Exception:  # pragma: no cover - экзотический инжектор
+                pass
+        self.admin = elevate.is_admin()
         self.hotkeys = hotkeys or HotkeyManager()
         self.ui = ui or NullUi()
 

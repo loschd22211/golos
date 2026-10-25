@@ -25,7 +25,7 @@ from golos.config import AppPaths, load_config
 from golos.logsetup import setup_logging
 from golos.hotkeys import pretty_hotkey
 from golos.system import SingleInstance, open_path, show_message
-from golos import winfocus
+from golos import elevate, winfocus
 
 log = logging.getLogger("golos")
 
@@ -148,6 +148,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-preload", action="store_true", help="не загружать модель при старте")
     parser.add_argument("--config", type=str, default="", help="путь к своему config.json")
     parser.add_argument("--debug", action="store_true", help="подробный журнал")
+    parser.add_argument(
+        "--no-admin",
+        action="store_true",
+        help="не запрашивать права администратора (в админские окна текст не вставится)",
+    )
     parser.add_argument("--status", action="store_true",
                         help="только проверить, запущен ли «Голос» (для скриптов)")
     parser.add_argument("--version", action="version", version=f"{APP_TITLE} {__version__}")
@@ -204,6 +209,13 @@ def main(argv: list[str] | None = None) -> int:
             show_message(APP_TITLE, message)
         return 0
 
+    if _should_elevate(args, config):
+        log.info("Запускаю повторно, чтобы получить права администратора")
+        if elevate.relaunch_as_admin(sys.argv[1:]):
+            single.release()
+            return 0
+        log.warning("Работаю без прав администратора: админские окна ввод не примут")
+
     app = DictationApp(
         config=config,
         paths=paths,
@@ -222,6 +234,22 @@ def main(argv: list[str] | None = None) -> int:
             return _run_console(app, single)
     finally:
         single.release()
+
+
+def _should_elevate(args: argparse.Namespace, config) -> bool:
+    """Нужно ли перезапуститься с правами администратора.
+
+    Без прав Windows блокирует вставку в окна, запущенные от администратора
+    (самая частая жалоба — браузер). Просим права один раз за запуск, чтобы
+    не попасть в цикл UAC; автозапуск и консольный режим не трогаем.
+    """
+    if not config.run_as_admin or getattr(args, "no_admin", False):
+        return False
+    if args.silent or args.no_gui:  # автозапуск: UAC при входе только мешает
+        return False
+    if elevate.is_admin():
+        return False
+    return not elevate.already_attempted(sys.argv[1:])
 
 
 # ------------------------------------------------------------------------ modes
@@ -322,6 +350,14 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
         overlay.hide()
     else:
         overlay.show()
+
+    if not app.admin:
+        bridge.on_notify(
+            "Голос",
+            "Нет прав администратора: в окна, запущенные от администратора "
+            "(например браузер), текст не вставится. Правый клик по иконке в трее → "
+            "«Перезапустить от администратора»",
+        )
 
     if not app.transcriber.is_model_downloaded():
         bridge.on_notify("Голос", "Модель скачается при первой диктовке (один раз)")
