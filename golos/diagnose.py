@@ -90,6 +90,88 @@ def check_environment(root: Path) -> None:
         say(OK, "версия Python подходит")
 
 
+def check_code_version(root: Path) -> None:
+    """Не запущена ли старая копия кода — из-за этого «фиксы не работают»."""
+    section("Версия кода")
+    try:
+        from golos import __version__
+
+        print(f"     версия: {__version__}")
+    except Exception as exc:
+        say(BAD, "не удалось определить версию", str(exc))
+
+    missing = [
+        name for name in ("diagnose.py", "streaming.py", "overlay.py")
+        if not (root / "golos" / name).exists()
+    ]
+    if missing:
+        say(BAD, "в коде нет новых модулей", ", ".join(missing))
+        print("     Обновитесь: git checkout main && git pull")
+        return
+
+    git_dir = root / ".git"
+    if not git_dir.exists():
+        say(WARN, "папка не git-репозиторий", "обновление вручную: скачать ZIP из main")
+        return
+
+    try:
+        import subprocess
+
+        def git(*args) -> str:
+            return subprocess.run(
+                ["git", *args], cwd=str(root), capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+
+        branch = git("rev-parse", "--abbrev-ref", "HEAD")
+        commit = git("log", "-1", "--oneline")
+        print(f"     ветка: {branch}")
+        print(f"     коммит: {commit}")
+        behind = git("rev-list", "--count", "HEAD..origin/main")
+        if behind.isdigit() and int(behind) > 0:
+            say(WARN, "код отстаёт от main", f"{behind} коммит(ов) — сделайте git pull")
+        else:
+            say(OK, "код актуален", branch)
+    except Exception as exc:
+        say(WARN, "git недоступен", str(exc))
+
+
+def check_gpu(config) -> bool:
+    """Есть ли рабочая CUDA. Возвращает True, если видеокарта пригодна."""
+    section("Видеокарта (CUDA)")
+    count = 0
+    try:
+        import ctranslate2
+
+        count = int(ctranslate2.get_cuda_device_count())
+    except Exception as exc:
+        say(WARN, "ctranslate2 не отвечает", str(exc))
+        return False
+
+    if count <= 0:
+        say(WARN, "CUDA не найдена — распознавание пойдёт на процессоре", "это нормально, но медленнее")
+        return False
+
+    print(f"     устройств CUDA: {count}")
+    try:
+        import ctypes
+
+        ctypes.WinDLL("cublas64_12.dll")
+        ctypes.WinDLL("cublasLt64_12.dll")
+        say(OK, "библиотеки CUDA на месте")
+        return True
+    except Exception:
+        say(
+            WARN,
+            "видеокарта есть, но не хватает cublas64_12.dll",
+            "модель всё равно уйдёт на CPU — см. рекомендации ниже",
+        )
+        print("     Варианты: 1) оставить работу на CPU: \"device\": \"cpu\" "
+              "(так и сделает --fix);")
+        print("               2) доставить библиотеки CUDA 12 (cuBLAS + cuDNN) "
+              "и оставить device: auto.")
+        return False
+
+
 def check_packages() -> None:
     section("Пакеты")
     required = ("faster_whisper", "sounddevice", "numpy", "keyboard", "pyperclip")
@@ -250,7 +332,13 @@ def check_model(config, appdata: Path, recording) -> None:
         started = time.time()
         transcriber.preload()
         load_time = time.time() - started
+        device = getattr(transcriber, "active_device", "") or "?"
+        compute = getattr(transcriber, "active_compute", "") or "?"
         say(OK, f"модель {config.model} загружена", f"{load_time:.1f} c")
+        print(f"     реально работает на: {device}/{compute}")
+        reason = getattr(transcriber, "fallback_reason", "")
+        if reason:
+            say(WARN, "видеокарта не использована", reason)
 
         if recording is None:
             say(WARN, "распознавание не проверено", "не было записи")
@@ -343,7 +431,7 @@ def check_log(appdata: Path) -> None:
         say(OK, "ошибок в журнале нет", str(path))
 
 
-def fix_config(appdata: Path) -> None:
+def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
     section("Исправление настроек (--fix)")
     path = appdata / "config.json"
     data = {}
@@ -372,6 +460,11 @@ def fix_config(appdata: Path) -> None:
     )
     if data.get("language") not in ("auto", "ru", "en"):
         data["language"] = "auto"
+    if cuda_ok is False:
+        # Незачем каждый запуск пытаться поднять CUDA, если библиотек нет:
+        # это лишние секунды и запись в журнал.
+        data["device"] = "cpu"
+        data["compute_type"] = "int8"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -398,11 +491,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Дата: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
     check_environment(root)
+    check_code_version(root)
     config, raw = check_config(appdata)
-    if args.fix:
-        fix_config(appdata)
-        config, raw = check_config(appdata)
     check_packages()
+    cuda_ok = check_gpu(config)
+    if args.fix:
+        fix_config(appdata, cuda_ok=cuda_ok)
+        config, raw = check_config(appdata)
     check_devices()
     check_hotkeys(config)
     check_clipboard()

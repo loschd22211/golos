@@ -153,3 +153,107 @@ def test_recording_silence_is_reported(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "молчит" in out
     assert diagnose.failures
+
+
+# ------------------------------------------------------- CUDA и версия кода
+def test_gpu_check_without_ctranslate2(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "ctranslate2", None)
+    diagnose.warnings.clear()
+    assert diagnose.check_gpu(types.SimpleNamespace()) is False
+    out = capsys.readouterr().out
+    assert "ctranslate2 не отвечает" in out
+    assert diagnose.warnings
+
+
+def test_gpu_check_reports_missing_cublas(monkeypatch, capsys):
+    module = types.ModuleType("ctranslate2")
+    module.get_cuda_device_count = lambda: 1
+    monkeypatch.setitem(sys.modules, "ctranslate2", module)
+
+    import ctypes
+
+    def fake_windll(name):
+        raise OSError(f"{name} not found")
+
+    monkeypatch.setattr(ctypes, "WinDLL", fake_windll, raising=False)
+    diagnose.warnings.clear()
+
+    assert diagnose.check_gpu(types.SimpleNamespace()) is False
+    out = capsys.readouterr().out
+    assert "cublas64_12.dll" in out
+    assert any("cublas" in w for w in diagnose.warnings)
+
+
+def test_gpu_check_ok(monkeypatch, capsys):
+    module = types.ModuleType("ctranslate2")
+    module.get_cuda_device_count = lambda: 1
+    monkeypatch.setitem(sys.modules, "ctranslate2", module)
+
+    import ctypes
+
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name: object(), raising=False)
+
+    assert diagnose.check_gpu(types.SimpleNamespace()) is True
+    assert "библиотеки CUDA на месте" in capsys.readouterr().out
+
+
+def test_fix_switches_to_cpu_without_cuda(monkeypatch, tmp_path, capsys):
+    appdata = tmp_path / "appdata" / "Golos"
+    appdata.mkdir(parents=True)
+    (appdata / "config.json").write_text(json.dumps({"model": "large-v3"}), encoding="utf-8")
+
+    diagnose.fix_config(appdata, cuda_ok=False)
+    capsys.readouterr()
+
+    data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
+    assert data["device"] == "cpu"
+    assert data["compute_type"] == "int8"
+
+
+def test_fix_keeps_auto_with_working_cuda(monkeypatch, tmp_path, capsys):
+    appdata = tmp_path / "appdata" / "Golos"
+    appdata.mkdir(parents=True)
+    (appdata / "config.json").write_text(json.dumps({}), encoding="utf-8")
+
+    diagnose.fix_config(appdata, cuda_ok=True)
+    capsys.readouterr()
+
+    data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
+    assert "device" not in data or data["device"] == "auto"
+
+
+def test_code_version_detects_missing_modules(monkeypatch, tmp_path, capsys):
+    diagnose.failures.clear()
+    diagnose.check_code_version(tmp_path)
+    out = capsys.readouterr().out
+    assert "нет новых модулей" in out
+    assert "git checkout main" in out
+    assert diagnose.failures
+
+
+def test_code_version_reads_git(monkeypatch, tmp_path, capsys):
+    (tmp_path / "golos").mkdir()
+    for name in ("diagnose.py", "streaming.py", "overlay.py"):
+        (tmp_path / "golos" / name).write_text("", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+
+    import subprocess
+
+    def fake_run(cmd, **kwargs):
+        args = cmd[1:]
+        if args[:1] == ["rev-parse"]:
+            output = "main"
+        elif args[:1] == ["log"]:
+            output = "abc123 обновление"
+        elif args[:1] == ["rev-list"]:
+            output = "2"
+        else:
+            output = ""
+        return types.SimpleNamespace(stdout=output, returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    diagnose.warnings.clear()
+    diagnose.check_code_version(tmp_path)
+    out = capsys.readouterr().out
+    assert "ветка: main" in out
+    assert "код отстаёт от main" in out
