@@ -135,3 +135,59 @@ def preview(text: str, limit: int = 60) -> str:
     if len(flat) <= limit:
         return flat
     return flat[: limit - 1].rstrip() + "…"
+
+
+# --------------------------------------------------- галлюцинации распознавания
+# Whisper на тишине, шуме и обрывках фраз «вспоминает» титры и заставки из
+# обучающих данных. По-русски это чаще всего «Редактор субтитров А.Семкин
+# Корректор В.Сухиашвили», «Продолжение следует», «Спасибо за просмотр».
+_HALLUCINATION_MARKERS = (
+    "редактор субтитров",
+    "корректор",
+    "субтитры сделал",
+    "субтитры подготовил",
+    "продолжение следует",
+    "спасибо за просмотр",
+    "спасибо за внимание",
+    "подписывайтесь на канал",
+    "подпишись на канал",
+    "ставьте лайки",
+    "смотрите также",
+    "dimatorzok",
+    "семкин",
+    "сухиашвили",
+    "продолжение в следующей серии",
+    "редактор:",
+    "корректор:",
+)
+
+# Целый кусок, состоящий только из такого «слова», — почти наверняка артефакт.
+_HALLUCINATION_ONLY = {
+    "музыка", "music", "аплодисменты", "applause", "смех", "laughter",
+    "тишина", "silence", "шум", "noise", "субтитры", "продолжение",
+    "аминь", "amen", "конец", "end", "you", "thank you", "thanks",
+    "спасибо", "пока", "bye", "музыка.",
+}
+
+
+def _squash(text: str) -> str:
+    return " ".join((text or "").lower().replace("ё", "е").split())
+
+
+def looks_like_hallucination(text: str) -> bool:
+    """Похоже ли на «выдумку» модели, а не на речь пользователя."""
+    plain = _squash(text).strip(" .,!?…-—:;\"'()[]{}")
+    if not plain:
+        return True
+    if plain in _HALLUCINATION_ONLY:
+        return True
+    return any(marker in plain for marker in _HALLUCINATION_MARKERS)
+
+
+def drop_hallucinations(text: str) -> str:
+    """Убрать из готового текста куски-выдумки (без изменения остального)."""
+    if not text or not text.strip():
+        return ""
+    if looks_like_hallucination(text):
+        return ""
+    return text

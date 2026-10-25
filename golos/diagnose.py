@@ -180,23 +180,33 @@ def check_gpu(config) -> bool:
         return False
 
     print(f"     устройств CUDA: {count}")
+
+    try:
+        from golos.cuda import enable_dlls, pip_hint
+
+        dirs = enable_dlls()
+        if dirs:
+            print(f"     библиотеки CUDA из pip: {len(dirs)} папк(и)")
+    except Exception:  # pragma: no cover
+        def pip_hint() -> str:  # type: ignore[misc]
+            return "pip install nvidia-cublas-cu12 nvidia-cudnn-cu12"
+
     try:
         import ctypes
 
         ctypes.WinDLL("cublas64_12.dll")
         ctypes.WinDLL("cublasLt64_12.dll")
-        say(OK, "библиотеки CUDA на месте")
+        say(OK, "библиотеки CUDA на месте", "распознавание пойдёт на видеокарте")
         return True
     except Exception:
         say(
             WARN,
             "видеокарта есть, но не хватает cublas64_12.dll",
-            "модель всё равно уйдёт на CPU — см. рекомендации ниже",
+            "модель уйдёт на CPU — это в разы медленнее",
         )
-        print("     Варианты: 1) оставить работу на CPU: \"device\": \"cpu\" "
-              "(так и сделает --fix);")
-        print("               2) доставить библиотеки CUDA 12 (cuBLAS + cuDNN) "
-              "и оставить device: auto.")
+        print(f"     Быстрое решение без CUDA Toolkit: .venv\\Scripts\\python.exe -m {pip_hint()}")
+        print("     (или запустите install.bat заново — он поставит их сам).")
+        print("     Если видеокарта не нужна: \"device\": \"cpu\" (так сделает --fix).")
         return False
 
 
@@ -513,6 +523,34 @@ def check_streaming_logic(config, appdata: Path, recording, transcriber=None) ->
         traceback.print_exc()
 
 
+def check_noise_filters() -> None:
+    """Проверить, что фильтры «фантомных» фраз работают."""
+    section("Фильтры выдумок и тишины")
+    try:
+        from golos.textproc import looks_like_hallucination
+
+        samples = [
+            "Редактор субтитров А.Семкин Корректор В.Сухиашвили",
+            "Продолжение следует...",
+            "музыка",
+        ]
+        missed = [text for text in samples if not looks_like_hallucination(text)]
+        if missed:
+            say(BAD, "фильтр пропускает известные выдумки", ", ".join(missed))
+        else:
+            say(OK, "известные выдумки отбрасываются", "титры, «музыка», «продолжение»")
+
+        from golos.config import Config
+
+        cfg = Config()
+        if cfg.vad_filter and getattr(cfg, "silence_threshold", 0) > 0:
+            say(OK, "тишина не уходит в модель", f"порог {cfg.silence_threshold}")
+        else:
+            say(WARN, "фильтр тишины выключен", "будет медленнее и больше выдумок")
+    except Exception as exc:  # pragma: no cover
+        say(WARN, "проверка фильтров не удалась", str(exc))
+
+
 def check_log(appdata: Path) -> None:
     section("Журнал")
     path = appdata / "golos.log"
@@ -569,6 +607,10 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
         data["language"] = "auto"
     if data.get("streaming") is not True:
         data["streaming"] = True
+    if cuda_ok:
+        # Видеокарта рабочая — незачем сидеть на процессоре.
+        data["device"] = "auto"
+        data["compute_type"] = "auto"
     if cuda_ok is False:
         # Незачем каждый запуск пытаться поднять CUDA, если библиотек нет:
         # это лишние секунды и запись в журнал.
@@ -581,6 +623,8 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         say(OK, "настройки обновлены", str(path))
         print("     модель small, потоковая вставка включена, beam 3")
+        if cuda_ok:
+            print("     устройство auto — видеокарта работает, будет быстро")
         if data.get("device") == "cpu":
             print("     устройство cpu/int8 (CUDA недоступна), язык: "
                   f"{data.get('language', 'auto')}")
@@ -623,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
         recording = check_recording(config, max(2.0, args.record))
     transcriber = check_model(config, appdata, recording)
     check_streaming_logic(config, appdata, recording, transcriber)
+    check_noise_filters()
     check_log(appdata)
 
     section("Итог")

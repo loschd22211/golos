@@ -30,3 +30,16 @@ def test_update_bat_switches_to_main_and_runs():
 def test_run_bat_starts_app():
     text = (ROOT / "run.bat").read_text(encoding="utf-8")
     assert "golos_app.py" in text
+
+
+def test_update_bat_installs_dependencies_after_pull():
+    """После обновления нужны новые пакеты (CUDA из pip) — не забыть их поставить."""
+    text = (ROOT / "update.bat").read_text(encoding="utf-8")
+    assert "install.ps1" in text
+    assert "git pull" in text
+
+
+def test_install_installs_cuda_packages_only_for_nvidia():
+    text = (ROOT / "install.ps1").read_text(encoding="utf-8-sig")
+    assert "nvidia-cublas-cu12" in text and "nvidia-cudnn-cu12" in text
+    assert "Win32_VideoController" in text  # без NVIDIA не качаем гигабайт

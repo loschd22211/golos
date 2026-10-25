@@ -22,7 +22,8 @@ class FakeRecorder:
     def snapshot(self):
         import numpy as np
 
-        return np.zeros(self.length, dtype=np.float32)
+        # 0.1 — «есть звук»: тишина теперь в модель не уходит
+        return np.full(self.length, 0.1, dtype=np.float32)
 
 
 class FakeTranscriber:
@@ -397,7 +398,7 @@ def test_injection_error_stops_the_session():
     for _ in range(3):
         if stream._fatal:
             break
-        stream._process_tail(np.zeros(16000 * 3, dtype=np.float32), final=False)
+        stream._process_tail(np.full(16000 * 3, 0.1, dtype=np.float32), final=False)
 
     assert injector.calls == 1
     assert len(errors) == 1
@@ -422,7 +423,7 @@ def test_repeating_chunk_is_not_inserted_forever():
         config=cfg,
     )
 
-    audio = np.zeros(16000 * 3, dtype=np.float32)
+    audio = np.full(16000 * 3, 0.1, dtype=np.float32)
     for _ in range(5):
         stream._process_tail(audio, final=False)
 
@@ -463,8 +464,76 @@ def test_different_chunks_are_all_inserted():
         config=cfg,
     )
 
-    audio = np.zeros(16000 * 3, dtype=np.float32)
+    audio = np.full(16000 * 3, 0.1, dtype=np.float32)
     for _ in range(4):
         stream._process_tail(audio, final=False)
 
     assert len(injector.inserted) == 4
+
+
+# ----------------------------------------------------------- тишина и выдумки
+def test_silence_is_not_sent_to_the_model():
+    """Тишину не распознаём: и процессор целее, и «фантомных» фраз нет."""
+    import numpy as np
+
+    injector = FakeInjector()
+    transcriber = WordTranscriber()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=transcriber,
+        injector=injector,
+        config=Config(),
+    )
+
+    stream._process_tail(np.zeros(16000 * 3, dtype=np.float32), final=False)
+
+    assert transcriber.calls == []      # модель не вызывалась
+    assert injector.inserted == []
+    assert stream.chunks_inserted == 0
+
+
+def test_quiet_but_audible_speech_is_recognized():
+    import numpy as np
+
+    injector = FakeInjector()
+    transcriber = WordTranscriber()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=transcriber,
+        injector=injector,
+        config=Config(),
+    )
+
+    # тихая, но различимая речь (0.02) должна обрабатываться
+    stream._process_tail(np.full(16000 * 3, 0.02, dtype=np.float32), final=False)
+    assert transcriber.calls
+
+
+def test_hallucinated_subtitle_credits_are_dropped():
+    """«Редактор субтитров А.Семкин Корректор В.Сухиашвили» — не речь."""
+    import numpy as np
+
+    class CreditsTranscriber(WordTranscriber):
+        def segments(self, audio, config=None, initial_prompt=None, beam_size=None,
+                     want_words=True):
+            duration = audio.size / 16000.0
+            text = "Редактор субтитров А.Семкин Корректор В.Сухиашвили"
+            return [{
+                "text": text,
+                "start": 0.0,
+                "end": duration,
+                "words": [{"word": text, "start": 0.0, "end": duration}],
+            }]
+
+    injector = FakeInjector()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=CreditsTranscriber(),
+        injector=injector,
+        config=Config(),
+    )
+
+    stream._process_tail(np.full(16000 * 3, 0.1, dtype=np.float32), final=False)
+
+    assert injector.inserted == []
+    assert "субтитр" not in stream.committed_text.lower()

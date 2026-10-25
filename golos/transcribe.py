@@ -14,7 +14,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cuda import enable_dlls, pip_hint
 from .config import Config
+from .textproc import looks_like_hallucination
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +96,10 @@ class WhisperTranscriber:
             with self._lock:
                 if self._model is not None and self._model_key == key:
                     return self._model
+
+            if device == "cuda":
+                # Windows: cuBLAS/cuDNN из pip-пакетов, иначе CUDA не поднимется.
+                enable_dlls()
 
             try:
                 from faster_whisper import WhisperModel
@@ -177,7 +183,15 @@ class WhisperTranscriber:
             "task": "transcribe",
             "language": language,
             "beam_size": int(beam_size or 1),
-            "vad_filter": False,
+            # VAD выкидывает тишину и шум: без него модель «додумывает» фразы
+            # вроде «Редактор субтитров А.Семкин Корректор В.Сухиашвили».
+            "vad_filter": bool(cfg.vad_filter),
+            "vad_parameters": {"min_silence_duration_ms": 300, "threshold": 0.5},
+            # Не отдавать сегменты, где модель почти уверена, что речи нет.
+            "no_speech_threshold": 0.7,
+            "log_prob_threshold": -1.0,
+            "compression_ratio_threshold": 2.4,
+            "temperature": 0.0,
             "condition_on_previous_text": False,
             "without_timestamps": False,
             # Тайминги по словам нужны, чтобы вставлять текст ровно по границе
@@ -193,6 +207,9 @@ class WhisperTranscriber:
             for segment in pieces:
                 piece = (segment.text or "").strip()
                 if not piece:
+                    continue
+                if _is_noise_segment(segment, piece):
+                    log.debug("Поток: отброшен сегмент-выдумка %r", piece[:60])
                     continue
                 words = []
                 for word in getattr(segment, "words", None) or []:
@@ -233,7 +250,10 @@ class WhisperTranscriber:
             "language": language,
             "beam_size": int(cfg.beam_size),
             "vad_filter": bool(cfg.vad_filter),
-            "vad_parameters": {"min_silence_duration_ms": 500},
+            "vad_parameters": {"min_silence_duration_ms": 500, "threshold": 0.5},
+            "no_speech_threshold": 0.7,
+            "log_prob_threshold": -1.0,
+            "compression_ratio_threshold": 2.4,
             "condition_on_previous_text": bool(cfg.condition_on_previous_text),
             "without_timestamps": True,
             "word_timestamps": False,
@@ -248,6 +268,9 @@ class WhisperTranscriber:
                 detected = ""
                 for segment in segments:
                     piece = (segment.text or "").strip()
+                    if piece and _is_noise_segment(segment, piece):
+                        log.debug("Отброшен сегмент-выдумка %r", piece[:60])
+                        continue
                     if piece:
                         texts.append(piece)
                     if not detected:
@@ -300,13 +323,27 @@ def resolve_compute_type(device: str, preferred: str) -> str:
     return "float16" if device == "cuda" else "int8"
 
 
+def _is_noise_segment(segment, text: str) -> bool:
+    """Сегмент — «выдумка» модели: тишина, шум или титры из обучающих данных."""
+    if looks_like_hallucination(text):
+        return True
+    try:
+        no_speech = float(getattr(segment, "no_speech_prob", 0.0) or 0.0)
+        avg_logprob = float(getattr(segment, "avg_logprob", 0.0) or 0.0)
+    except (TypeError, ValueError):  # pragma: no cover
+        return False
+    # Модель почти уверена, что речи нет, и при этом не уверена в тексте.
+    return no_speech > 0.6 and avg_logprob < -0.8
+
+
 def _cuda_hint(exc: Exception) -> str:
     """Человеческое объяснение, почему CUDA не завелась."""
     text = str(exc).lower()
     if "cublas" in text or "cudnn" in text or "dll" in text:
         return (
             "Не хватает библиотек CUDA (cublas64_12.dll / cudnn). "
-            "Либо поставьте их, либо оставьте работу на процессоре: "
+            f"Поставьте их без CUDA Toolkit: {pip_hint()} — "
+            "«Голос» подхватит их сам. Либо оставьте процессор: "
             "в config.json \"device\": \"cpu\"."
         )
     if "out of memory" in text:

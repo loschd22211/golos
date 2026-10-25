@@ -24,8 +24,36 @@ from . import winfocus
 
 log = logging.getLogger(__name__)
 
-WIDTH = 312
-HEIGHT = 92
+WIDTH = 348
+HEIGHT = 96
+
+# Геометрия кнопок — один источник правды: по этим прямоугольникам и рисуем,
+# и ловим клики. Раньше крестик рисовался вверху справа, а клик искали внизу
+# справа, поэтому кнопки «не реагировали».
+MIC_CX, MIC_CY, MIC_R = 46, HEIGHT // 2, 26
+BTN = 26          # сторона квадратных кнопок
+BTN_TOP = 14
+BTN_GAP = 6
+
+
+def button_rects(recording: bool) -> dict:
+    """Прямоугольники кнопок справа: (x0, y0, x1, y1)."""
+    right = WIDTH - 8
+    rects = {}
+    for name in ("close", "settings") + (("stop",) if recording else ()):
+        x1 = right
+        x0 = right - BTN
+        rects[name] = (x0, BTN_TOP, x1, BTN_TOP + BTN)
+        right = x0 - BTN_GAP
+    return rects
+
+
+BUTTON_GLYPHS = {"close": "✕", "settings": "⚙", "stop": "■"}
+BUTTON_TITLES = {
+    "close": "Закрыть «Голос» (Alt+F4 / меню → Выход)",
+    "settings": "Настройки",
+    "stop": "Остановить запись (микрофон выключится)",
+}
 
 BG = "#141922"
 BORDER = "#2b3342"
@@ -96,7 +124,8 @@ class Overlay:
         self.partial = ""
         self.last = ""
         self.error = ""
-        self._hover = False
+        self._hover = ""       # какая кнопка под курсором
+        self._pressed = ""     # какая кнопка нажата
         self._pulse = 0
         self._drag = None
 
@@ -130,6 +159,7 @@ class Overlay:
         self.menu = tk.Menu(root, tearoff=0)
         self.menu.add_command(label="Настройки…", command=self.open_settings)
         self.menu.add_command(label="Открыть журнал", command=self.open_log)
+        self.menu.add_command(label="Скрыть плашку", command=self.hide)
         self.menu.add_separator()
         self.menu.add_command(label="Выход", command=self.on_quit)
 
@@ -185,47 +215,85 @@ class Overlay:
             self.partial if self.partial else STATE_HINTS.get(self.state, "")
         )
         title_color = RED if self.state == ERROR else (TEXT if self.partial else MUTED)
-        shown = _tail(title, 34) if (self.partial and self.state != ERROR) else _short(title, 34)
-        c.create_text(84, 30, anchor="w", text=shown, fill=title_color, font=_font(10, True))
+        shown = _tail(title, 36) if (self.partial and self.state != ERROR) else _short(title, 36)
+        text_right = WIDTH - 116  # не залезаем под кнопки справа
+        c.create_text(84, 32, anchor="w", text=shown, fill=title_color, font=_font(10, True))
 
         hint = f"{pretty_hotkey(self.app.config.hotkey)} · {self.state}" if self.state != ERROR else "нажмите журнал"
         if self.partial and self.state == RECORDING:
             hint = f"слушаю… {self.app.config.model}"
         elif self.last and self.state != ERROR:
             hint = f"вставлено: {_tail(self.last, 30)}"
-        c.create_text(84, 52, anchor="w", text=_short(hint, 34), fill=MUTED, font=_font(8))
+        c.create_text(84, 54, anchor="w", text=_short(hint, 38), fill=MUTED, font=_font(8))
 
         # индикатор уровня
-        bar_x0, bar_x1, bar_y = 84, WIDTH - 58, 66
+        bar_x0, bar_x1, bar_y = 84, text_right, 72
         c.create_rectangle(bar_x0, bar_y, bar_x1, bar_y + 4, fill="#232b39", outline="")
         if self.level > 0.01:
             width = max(3, int((bar_x1 - bar_x0) * min(1.0, self.level)))
             bar_color = GREEN if self.level < 0.6 else (AMBER if self.level < 0.85 else RED)
             c.create_rectangle(bar_x0, bar_y, bar_x0 + width, bar_y + 4, fill=bar_color, outline="")
 
-        # кнопки справа: журнал/ошибки и настройки, закрытие
-        c.create_text(WIDTH - 44, 28, text="⚙", fill=MUTED, font=_font(11))
-        c.create_text(WIDTH - 20, 28, text="✕", fill=MUTED, font=_font(10))
+        # кнопки справа: стоп (во время записи), настройки, закрыть.
+        # Рисуем ровно в тех же прямоугольниках, по которым ловим клики.
+        for name, (x0, y0, x1, y1) in self._buttons().items():
+            hovered = self._hover == name
+            pressed = self._pressed == name
+            fill = "#243044" if hovered or pressed else "#1c2333"
+            if pressed:
+                fill = "#2f3d55"
+            if name == "stop":
+                fill = "#3a1a1e" if not hovered else "#4a2226"
+            c.create_rectangle(x0, y0, x1, y1, fill=fill, outline="")
+            glyph_color = WHITE if hovered or pressed else MUTED
+            if name == "stop":
+                glyph_color = "#ffb3b6" if not hovered else WHITE
+            c.create_text(
+                (x0 + x1) / 2,
+                (y0 + y1) / 2,
+                text=BUTTON_GLYPHS[name],
+                fill=glyph_color,
+                font=_font(10 if name != "settings" else 11),
+            )
+
         if self.error:
-            c.create_text(WIDTH - 44, 56, text="!", fill=RED, font=_font(11, True))
+            # Красная «!» у кнопки микрофона: видно, что есть ошибка, и по клику
+            # по строке статуса открывается журнал.
+            c.create_text(MIC_CX + MIC_R + 2, 14, text="!", fill=RED, font=_font(11, True))
+
+        # во время записи дополнительно подсказываем, что микрофон можно выключить
+        if self.state == RECORDING:
+            c.create_text(text_right, 54, anchor="e", text="стоп", fill=MUTED, font=_font(7))
 
     # ------------------------------------------------------------------- events
+    def _buttons(self) -> dict:
+        """Кнопки, доступные в текущем состоянии."""
+        return button_rects(self.state == RECORDING)
+
     def _hit(self, event) -> str:
-        if event.y > HEIGHT - 30 and event.x > WIDTH - 34:
-            return "close"
-        if event.y > HEIGHT - 34 and WIDTH - 62 < event.x <= WIDTH - 30:
-            return "menu"
-        if 84 < event.x < WIDTH - 62:
-            return "status" if 40 < event.y < 76 else "drag"
-        if event.x < 84:
+        """Что под курсором: имя кнопки, «mic», «status» или «drag»."""
+        for name, (x0, y0, x1, y1) in self._buttons().items():
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                return name
+
+        if (event.x - MIC_CX) ** 2 + (event.y - MIC_CY) ** 2 <= (MIC_R + 8) ** 2:
             return "mic"
+
+        if self.error and 84 <= event.x <= WIDTH - 120 and 44 <= event.y <= 74:
+            return "status"
         return "drag"
 
     def _on_press(self, event) -> None:
         self._drag = (event.x_root, event.y_root, self.root.winfo_x(), self.root.winfo_y())
+        hit = self._hit(event)
+        if hit != "drag":
+            self._pressed = hit
+            self._draw()
 
     def _on_release(self, event) -> None:
         hit = self._hit(event)
+        pressed = self._pressed
+        self._pressed = ""
         moved = False
         if self._drag:
             moved = (
@@ -233,16 +301,46 @@ class Overlay:
                 or abs(event.y_root - self._drag[1]) > 4
             )
         self._drag = None
+        self._draw()
         if moved:
             return
+        # Действие выполняем, только если нажали и отпустили на одной кнопке.
+        if pressed and pressed != hit:
+            return
+        self.activate(hit)
+
+    def activate(self, hit: str) -> None:
+        """Выполнить действие кнопки (отдельно — удобно и для тестов)."""
         if hit == "mic":
             self.app.toggle()
+        elif hit == "stop":
+            self._stop_recording()
         elif hit == "close":
-            self.hide()
-        elif hit == "menu":
-            self.open_menu(event)
+            self.close()
+        elif hit == "settings":
+            self.open_settings()
         elif hit == "status" and self.error:
             self.open_log()
+
+    def _stop_recording(self) -> None:
+        """Выключить микрофон: остановить запись и вставить остаток."""
+        stopper = getattr(self.app, "stop_recording", None)
+        try:
+            if callable(stopper):
+                stopper()
+            else:  # pragma: no cover - на всякий случай
+                self.app.toggle()
+        except Exception as exc:  # pragma: no cover
+            log.warning("Не удалось остановить запись: %s", exc)
+
+    def close(self) -> None:
+        """Крестик закрывает программу полностью."""
+        log.info("Закрытие по крестику")
+        try:
+            self.on_quit()
+        except Exception as exc:  # pragma: no cover
+            log.warning("Выход не удался: %s", exc)
+            self.hide()
 
     def _on_drag(self, event) -> None:
         if not self._drag:
@@ -252,7 +350,8 @@ class Overlay:
         self.root.geometry(f"+{self._drag[2] + dx}+{self._drag[3] + dy}")
 
     def _on_motion(self, event) -> None:
-        hover = event.x < 84
+        hit = self._hit(event)
+        hover = "" if hit == "drag" else hit
         if hover != self._hover:
             self._hover = hover
             self._draw()

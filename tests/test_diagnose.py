@@ -409,3 +409,28 @@ def test_target_window_check_reports_target(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "цель вставки" in out
     assert "окно-получатель определено" in out
+
+
+def test_noise_filters_check(capsys):
+    diagnose.warnings.clear()
+    diagnose.failures.clear()
+    diagnose.check_noise_filters()
+    out = capsys.readouterr().out
+    assert "известные выдумки отбрасываются" in out
+    assert "тишина не уходит в модель" in out
+    assert not diagnose.failures
+
+
+def test_fix_enables_gpu_when_cuda_works(tmp_path, capsys):
+    appdata = tmp_path / "appdata" / "Golos"
+    appdata.mkdir(parents=True)
+    (appdata / "config.json").write_text(
+        json.dumps({"device": "cpu", "compute_type": "int8"}), encoding="utf-8"
+    )
+
+    diagnose.fix_config(appdata, cuda_ok=True)
+    capsys.readouterr()
+
+    data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
+    assert data["device"] == "auto"
+    assert data["compute_type"] == "auto"
