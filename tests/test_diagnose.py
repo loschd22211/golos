@@ -471,6 +471,59 @@ def test_phrase_similarity():
     assert diagnose.phrase_similarity(diagnose.TEST_PHRASE, "もう ガ サ 助手") < 0.2
 
 
+def test_save_wav_writes_playable_file(tmp_path):
+    import wave
+
+    import numpy as np
+
+    path = diagnose.save_wav(tmp_path / "test-audio.wav", np.zeros(1600, dtype=np.float32))
+    assert path is not None and path.exists()
+    with wave.open(str(path), "rb") as handle:
+        assert handle.getnframes() == 1600
+        assert handle.getframerate() == 16000
+
+
+def test_audio_report_flags_silence():
+    import numpy as np
+
+    report = diagnose.audio_report(np.zeros(16000, dtype=np.float32))
+    assert report["speech"] is False
+    assert report["peak"] == 0.0
+
+
+def test_audio_report_recognises_speech():
+    from tests.test_streaming import speech_like
+
+    report = diagnose.audio_report(speech_like(2, 0.1))
+    assert report["speech"] is True
+
+
+def test_own_overlay_is_not_a_target(monkeypatch):
+    from golos import winfocus
+
+    monkeypatch.setattr(winfocus, "window_title", lambda hwnd: "Голос")
+    assert diagnose._looks_like_overlay(4242) is True
+
+
+def test_target_window_check_rejects_overlay(monkeypatch, capsys):
+    from golos import elevate, winfocus
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(winfocus.TargetTracker, "remember_current", lambda self: True)
+    monkeypatch.setattr(winfocus.TargetTracker, "resolve_target", lambda self: 777)
+    monkeypatch.setattr(winfocus, "window_title", lambda hwnd: "Голос")
+    monkeypatch.setattr(
+        elevate, "describe_window", lambda hwnd=None: "«Голос» (pythonw.exe)"
+    )
+    diagnose.warnings.clear()
+
+    diagnose.check_target_window()
+    out = capsys.readouterr().out
+
+    assert "плашка «Голос»" in out
+    assert "текст пойдёт туда" not in out
+
+
 def test_performance_warns_when_gpu_unused(monkeypatch, capsys):
     """Видеокарта есть, а в настройках процессор — самая частая причина «медленно»."""
     from golos.config import Config

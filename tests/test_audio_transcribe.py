@@ -119,7 +119,8 @@ def test_resolve_device_variants(monkeypatch):
 def test_recorder_records_and_converts(monkeypatch):
     from golos.audio import MicrophoneRecorder
 
-    chunk = (np.ones((1600, 1), dtype=np.float32) * 0.3)
+    # Пишем в родной частоте микрофона (48 кГц): 4800 отсчётов = 0.1 c.
+    chunk = (np.ones((4800, 1), dtype=np.float32) * 0.3)
     install_fake_sounddevice(monkeypatch, [chunk.copy() for _ in range(5)])
     cfg = Config(sample_rate=16000, trim_silence=False)
     recorder = MicrophoneRecorder(cfg)
@@ -137,6 +138,29 @@ def test_recorder_records_and_converts(monkeypatch):
     assert recording
 
 
+def test_recorder_prefers_native_rate(monkeypatch):
+    """16 кГц «поддерживается», но пишем в родных 48 кГц и ресемплируем сами."""
+    from golos.audio import MicrophoneRecorder
+
+    module = install_fake_sounddevice(monkeypatch, [])
+    recorder = MicrophoneRecorder(Config(sample_rate=16000))
+    rate = recorder._pick_samplerate(module, 2)
+    assert rate == 48000
+
+
+def test_recorder_widens_when_native_is_16k(monkeypatch):
+    from golos.audio import MicrophoneRecorder
+
+    module = install_fake_sounddevice(monkeypatch, [])
+
+    def query_devices(device=None, kind=None):
+        return {"name": "USB Mic", "default_samplerate": 16000.0, "max_input_channels": 1}
+
+    module.query_devices = query_devices
+    recorder = MicrophoneRecorder(Config(sample_rate=16000))
+    assert recorder._pick_samplerate(module, 2) == 16000
+
+
 def test_recorder_resamples_when_device_rate_differs(monkeypatch):
     from golos.audio import MicrophoneRecorder
 
@@ -148,6 +172,23 @@ def test_recorder_resamples_when_device_rate_differs(monkeypatch):
     assert recording is not None
     assert abs(recording.duration - 1.0) < 0.01
     assert recording.samples.size == 16000
+
+
+def test_snapshot_is_already_at_model_rate(monkeypatch):
+    """snapshot() не пересчитывает весь буфер: блоки приводятся сразу."""
+    from golos.audio import MicrophoneRecorder
+
+    chunk = np.ones((4800, 1), dtype=np.float32) * 0.1  # 0.1 c при 48 кГц
+    install_fake_sounddevice(monkeypatch, [chunk.copy() for _ in range(4)])
+    recorder = MicrophoneRecorder(Config(sample_rate=16000, trim_silence=False))
+    recorder.start()
+    snapshot = recorder.snapshot()
+    recording = recorder.stop()
+
+    assert snapshot is not None
+    assert snapshot.size == 6400          # 0.4 c при 16 кГц
+    assert recording.samples.size == 6400
+    assert abs(recording.duration - 0.4) < 0.02
 
 
 def test_recorder_reports_open_error(monkeypatch):
