@@ -241,6 +241,21 @@ _HALLUCINATION_MARKERS = (
     "продолжение в следующей серии",
     "редактор:",
     "корректор:",
+    # Музыка и «радио» в комнате — самый частый источник фантомных фраз:
+    # Whisper слышит аккорды и «подписывает» их как трек.
+    "спокойная музыка",
+    "играет музыка",
+    "музыка играет",
+    "фоновая музыка",
+    "тихая музыка",
+    "классическая музыка",
+    "поп музыка",
+    "поп-музыка",
+    "рок музыка",
+    "звучит музыка",
+    "музыка в наушниках",
+    "музыкальный трек",
+    "плейлист",
 )
 
 # Целый кусок, состоящий только из такого «слова», — почти наверняка артефакт.
@@ -249,6 +264,11 @@ _HALLUCINATION_ONLY = {
     "тишина", "silence", "шум", "noise", "субтитры", "продолжение",
     "аминь", "amen", "конец", "end", "you", "thank you", "thanks",
     "спасибо", "пока", "bye", "музыка.",
+    # Жанры и радио-вставки: на музыке модель выдаёт именно их.
+    "поп", "рок", "джаз", "рэп", "хип-хоп", "блюз", "кантри",
+    "pop", "rock", "jazz", "rap", "blues", "country",
+    "мелодия", "трек", "песня", "song", "radio", "радио",
+    "спокойная музыка", "лёгкая музыка", "легкая музыка",
 }
 
 
@@ -266,6 +286,23 @@ def looks_like_hallucination(text: str) -> bool:
     if plain in _HALLUCINATION_ONLY:
         return True
     return any(marker in plain for marker in _HALLUCINATION_MARKERS)
+
+
+def is_short_phantom(text: str) -> bool:
+    """Короткий кусок без содержания: одно-два слова-жанра или междометия.
+
+    Отдельный «Поп.» на записи с музыкой — не речь, а подпись к аккордам.
+    """
+    plain = _squash(text).strip(" .,!?…-—:;\"'()[]{}«»")
+    if not plain:
+        return True
+    if plain in _HALLUCINATION_ONLY:
+        return True
+    words = [word.strip(" .,!?…-—:;\"'()[]{}«»") for word in plain.split()]
+    words = [word for word in words if word]
+    return bool(words) and len(words) <= 2 and all(
+        word in _HALLUCINATION_ONLY for word in words
+    )
 
 
 def drop_hallucinations(text: str) -> str:

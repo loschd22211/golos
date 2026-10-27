@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .cuda import enable_dlls, pip_hint
 from .config import Config
-from .textproc import looks_like_hallucination
+from .textproc import is_short_phantom, looks_like_hallucination
 
 log = logging.getLogger(__name__)
 
@@ -205,7 +205,13 @@ class WhisperTranscriber:
             # VAD выкидывает тишину и шум: без него модель «додумывает» фразы
             # вроде «Редактор субтитров А.Семкин Корректор В.Сухиашвили».
             "vad_filter": bool(cfg.vad_filter),
-            "vad_parameters": {"min_silence_duration_ms": 300, "threshold": 0.5},
+            # Порог VAD выше стандартного (0.5): музыка и гул на 0.6 уже не
+            # проходят как «речь», а тихая человеческая речь проходит.
+            "vad_parameters": {
+                "min_silence_duration_ms": 300,
+                "threshold": 0.6,
+                "min_speech_duration_ms": 200,
+            },
             # Не отдавать сегменты, где модель почти уверена, что речи нет.
             "no_speech_threshold": 0.7,
             "log_prob_threshold": -1.0,
@@ -245,6 +251,9 @@ class WhisperTranscriber:
                             "word": text,
                             "start": float(getattr(word, "start", 0.0) or 0.0),
                             "end": float(getattr(word, "end", 0.0) or 0.0),
+                            # Уверенность модели в конкретном слове: по ней видно
+                            # «додуманные» слова, которых человек не говорил.
+                            "probability": float(getattr(word, "probability", 1.0) or 0.0),
                         }
                     )
                 result.append(
@@ -287,7 +296,11 @@ class WhisperTranscriber:
             "language": language,
             "beam_size": int(cfg.beam_size),
             "vad_filter": bool(cfg.vad_filter),
-            "vad_parameters": {"min_silence_duration_ms": 500, "threshold": 0.5},
+            "vad_parameters": {
+                "min_silence_duration_ms": 500,
+                "threshold": 0.6,
+                "min_speech_duration_ms": 200,
+            },
             "no_speech_threshold": 0.7,
             "log_prob_threshold": -1.0,
             "compression_ratio_threshold": 2.4,
@@ -394,16 +407,21 @@ def resolve_compute_type(device: str, preferred: str) -> str:
 
 
 def _is_noise_segment(segment, text: str) -> bool:
-    """Сегмент — «выдумка» модели: тишина, шум или титры из обучающих данных."""
-    if looks_like_hallucination(text):
+    """Сегмент — «выдумка» модели: тишина, шум, музыка или титры из обучения."""
+    if looks_like_hallucination(text) or is_short_phantom(text):
         return True
     try:
         no_speech = float(getattr(segment, "no_speech_prob", 0.0) or 0.0)
         avg_logprob = float(getattr(segment, "avg_logprob", 0.0) or 0.0)
     except (TypeError, ValueError):  # pragma: no cover
         return False
-    # Модель почти уверена, что речи нет, и при этом не уверена в тексте.
-    return no_speech > 0.6 and avg_logprob < -0.8
+    # Модель «почти уверена», что речи нет, и при этом не уверена в тексте.
+    # Порог мягче прежнего (0.6/-0.8): на музыке и шуме именно такие сегменты
+    # и превращались в «Спокойная музыка», «Поп».
+    if no_speech > 0.45 and avg_logprob < -0.6:
+        return True
+    # Совсем неуверенное распознавание короткого куска — тоже выдумка.
+    return no_speech > 0.3 and avg_logprob < -1.1
 
 
 def _cuda_hint(exc: Exception) -> str:

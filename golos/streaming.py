@@ -25,7 +25,7 @@ import threading
 from .audio import MicrophoneRecorder, boost_quiet
 from .config import Config
 from .inject import InjectionError, TextInjector
-from .textproc import clean_text, looks_like_hallucination
+from .textproc import clean_text, is_short_phantom, looks_like_hallucination
 from .transcribe import TranscriptionError, WhisperTranscriber
 
 log = logging.getLogger(__name__)
@@ -191,6 +191,20 @@ class StreamingDictator:
             log.debug("Поток: %.1f c тишины — пропущено", duration)
             return
 
+        # Музыка, гул, шум вентилятора — не речь. Модель на таком материале
+        # «подписывает» звук словами («Спокойная музыка», «Поп»), и они уходят
+        # в текст, хотя человек молчал. Такой кусок в модель не отправляем.
+        if getattr(cfg, "skip_non_speech", True):
+            stats = _speech_stats(tail)
+            if stats["steady"]:
+                self._commit_all(rate, tail.size)
+                log.info(
+                    "Поток: %.1f c — похоже на музыку/шум (ровный звук, "
+                    "без речевых пауз) — пропущено",
+                    duration,
+                )
+                return
+
         if self._first_chunk:
             self.on_state(STATUS_LOADING, "Слушаю…")
             self._first_chunk = False
@@ -223,6 +237,22 @@ class StreamingDictator:
         if not items:
             log.info("Поток: %.1f c аудио — пустые сегменты", duration)
             return
+
+        # Слова, в которых модель сама не уверена, — это почти всегда «додумка».
+        # Именно так в текст попадали «Поп», «Если что», «Ну это было».
+        confident, dropped = _drop_uncertain(items, _word_confidence(cfg))
+        if dropped:
+            log.info(
+                "Поток: отброшено неуверенных слов %d (%s)",
+                dropped,
+                ", ".join(item["text"] for item in items if item not in confident)[:80],
+            )
+        if not confident:
+            log.info("Поток: %.1f c аудио — нет уверенных слов", duration)
+            if final:
+                self._commit_all(rate, tail.size)
+            return
+        items = confident
 
         limit = duration - hold_back
         ready = [item for item in items if item["end"] <= limit]
@@ -262,7 +292,10 @@ class StreamingDictator:
         raw_loop = looks_like_hallucination(raw)
         text = clean_text(raw, cfg)
 
-        if text.strip() and (raw_loop or looks_like_hallucination(text)):
+        if (
+            text.strip()
+            and (raw_loop or looks_like_hallucination(text) or is_short_phantom(text))
+        ):
             log.info("Поток: отброшена выдумка модели %r", (text or raw)[:60])
             self._commit(rate, ready[-1]["end"])
             return
@@ -364,6 +397,70 @@ def _rms(samples) -> float:
         return 1.0  # не мешаем работе, если numpy недоступен
 
 
+def _word_confidence(cfg) -> float:
+    """Минимальная уверенность модели в слове, чтобы оно попало в текст."""
+    try:
+        value = float(getattr(cfg, "word_confidence", 0.35))
+    except (TypeError, ValueError):  # pragma: no cover
+        return 0.35
+    return max(0.0, min(0.95, value))
+
+
+def _drop_uncertain(items: list[dict], threshold: float) -> tuple[list[dict], int]:
+    """Убрать слова, в которых модель не уверена.
+
+    ``probability`` есть только при включённых таймингах слов (у нас включены).
+    Слова без оценки (None) считаем уверенными: не наказываем за отсутствие
+    данных.
+    """
+    if threshold <= 0:
+        return items, 0
+    kept = [
+        item for item in items
+        if item.get("probability") is None or item["probability"] >= threshold
+    ]
+    return kept, len(items) - len(kept)
+
+
+def _speech_stats(samples) -> dict:
+    """Похож ли кусок на речь: считаем огибающую громкости.
+
+    У речи громкость «дышит»: слоги, паузы между словами. У музыки-подушки,
+    гула вентилятора и наводки 50 Гц огибающая почти ровная, и пауз нет.
+    Если и то и другое — это не речь.
+
+    Пороги намеренно осторожные: лучше пропустить пару секунд шума, чем
+    выбросить сказанную фразу.
+    """
+    default = {"steady": False, "cv": 1.0, "dips": 1.0}
+    try:
+        import numpy as np
+
+        audio = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if audio.size < 1600:
+            return default
+        frame = 320  # 20 мс при 16 кГц
+        count = audio.size // frame
+        if count < 8:
+            return default
+        frames = audio[: count * frame].reshape(count, frame)
+        envelope = np.sqrt((frames * frames).mean(axis=1))
+        loud = float(np.percentile(envelope, 90))
+        if loud <= 1e-5:
+            return {**default, "steady": True}
+        normalized = envelope / loud
+        mean = float(normalized.mean()) or 1e-6
+        cv = float(normalized.std()) / mean
+        dips = float((normalized < 0.25).mean())
+        return {
+            "steady": cv < 0.35 and dips < 0.08,
+            "cv": round(cv, 3),
+            "dips": round(dips, 3),
+        }
+    except Exception:  # pragma: no cover - numpy недоступен
+        return default
+
+
 def _items_from_segments(segments) -> list[dict]:
     """Разложить сегменты на минимальные единицы вставки — слова, если есть."""
     items: list[dict] = []
@@ -374,11 +471,24 @@ def _items_from_segments(segments) -> list[dict]:
                 text = (word.get("word") or "").strip()
                 if not text:
                     continue
-                items.append({"text": text, "end": float(word.get("end", 0.0) or 0.0)})
+                items.append(
+                    {
+                        "text": text,
+                        "end": float(word.get("end", 0.0) or 0.0),
+                        "probability": word.get("probability"),
+                    }
+                )
         else:
             text = (segment.get("text") or "").strip()
             if text:
-                items.append({"text": text, "end": float(segment.get("end", 0.0) or 0.0)})
+                items.append(
+                    {
+                        "text": text,
+                        "end": float(segment.get("end", 0.0) or 0.0),
+                        # Без таймингов слов уверенность неизвестна — не режем.
+                        "probability": None,
+                    }
+                )
     return items
 
 

@@ -172,6 +172,8 @@ def test_streaming_params_have_anti_hallucination_filters(monkeypatch, tmp_path)
     assert captured["compression_ratio_threshold"] == 2.4
     assert captured["temperature"] == 0.0
     assert captured["vad_parameters"]["min_silence_duration_ms"] == 300
+    # Музыка/гул не должны проходить как речь
+    assert captured["vad_parameters"]["threshold"] >= 0.6
 
 
 def test_streaming_drops_hallucinated_segments(monkeypatch, tmp_path):
