@@ -560,6 +560,21 @@ def test_fix_moves_weak_model_to_small(monkeypatch, tmp_path, capsys, no_deps):
     assert data["device"] == "auto"
 
 
+def test_partial_similarity_accepts_half_read_phrase():
+    """Половина образца — это не 0 %: запись могла оборваться раньше."""
+    half = "Проверка связи, один, два, три."
+    full = diagnose.phrase_similarity(diagnose.TEST_PHRASE, half)
+    partial = diagnose.best_partial_similarity(diagnose.TEST_PHRASE, half)
+    assert full < partial
+    assert partial > 0.9
+
+
+def test_partial_similarity_rejects_other_words():
+    assert diagnose.best_partial_similarity(
+        diagnose.TEST_PHRASE, "Даже кусочки гнили."
+    ) < 0.4
+
+
 def test_noise_filters_check_reports_music_and_confidence(monkeypatch, capsys):
     """Диагностика должна подтверждать новые фильтры фантомов."""
     diagnose.failures.clear()
