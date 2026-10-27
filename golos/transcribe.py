@@ -20,6 +20,11 @@ from .textproc import is_short_phantom, looks_like_hallucination
 
 log = logging.getLogger(__name__)
 
+# Смешанная речь «русский + английский»: язык определяется по каждому куску.
+MIXED_LANGUAGE = "ru+en"
+MIXED_FALLBACK = "ru"       # не разобрали — пишем, как слышится по-русски
+MIXED_MIN_SECONDS = 0.6      # короче повторять бессмысленно
+
 
 class TranscriptionError(RuntimeError):
     """Ошибка распознавания; текст показывается пользователю."""
@@ -72,9 +77,26 @@ class WhisperTranscriber:
         self._session_language = ""
 
     def _resolve_language(self, cfg: Config) -> str | None:
-        if cfg.language != "auto":
-            return cfg.language
+        mode = (getattr(cfg, "language", "") or "").strip().lower()
+        if mode == MIXED_LANGUAGE:
+            # Ничего не фиксируем: в одной фразе могут быть и русские слова, и
+            # английские термины, а «замок» на первом языке испортил бы вторую
+            # половину записи.
+            return None
+        if mode != "auto":
+            return mode
         return self._session_language or None
+
+    def _russian_retry_needed(self, cfg: Config, keep: str) -> bool:
+        """Стоит ли переспросить кусок по-русски (смешанный режим).
+
+        Так выполняется обещание «если не понял — пиши, как слышится
+        по-русски»: автоопределение оставило пустоту — не оставляем её в тексте.
+        """
+        mode = (getattr(cfg, "language", "") or "").strip().lower()
+        if mode != MIXED_LANGUAGE:
+            return False
+        return not (keep or "").strip()
 
     def is_model_downloaded(self, model: str | None = None) -> bool:
         """Есть ли модель локально (чтобы предупредить о скачивании)."""
@@ -231,7 +253,7 @@ class WhisperTranscriber:
         }
 
         with self._lock:
-            pieces, info = model.transcribe(audio, **params)
+            pieces, info = self._run_model(model, audio, params, cfg, duration)
             self._lock_session_language(cfg, info, duration)
             result = []
             for segment in pieces:
@@ -279,6 +301,25 @@ class WhisperTranscriber:
             self._session_language = detected
             log.info("Язык сеанса: %s (%.2f)", detected, probability)
 
+    def _run_model(self, model, audio, params: dict, cfg: Config, duration: float):
+        """Распознать кусок; в смешанном режиме — с повтором по-русски."""
+        pieces, info = model.transcribe(audio, **params)
+        pieces = list(pieces)
+        keep = " ".join((getattr(item, "text", "") or "") for item in pieces)
+        if duration < MIXED_MIN_SECONDS or not self._russian_retry_needed(cfg, keep):
+            return pieces, info
+        log.info(
+            "Смешанный режим: пусто после автоопределения (язык=%s) — повторяю по-русски",
+            getattr(info, "language", "") or "?",
+        )
+        retry_params = dict(params)
+        retry_params["language"] = MIXED_FALLBACK
+        retry_pieces, retry_info = model.transcribe(audio, **retry_params)
+        retry_pieces = list(retry_pieces)
+        if retry_pieces:
+            return retry_pieces, retry_info
+        return pieces, info
+
     # -------------------------------------------------------------- transcribe
     def transcribe(self, audio, config: Config | None = None) -> TranscriptionResult:
         cfg = config or self.config
@@ -311,9 +352,10 @@ class WhisperTranscriber:
             "hotwords": cfg.hotwords or None,
         }
 
+        duration = float(getattr(audio, "size", 0)) / float(cfg.sample_rate or 16000)
         try:
             with self._lock:
-                segments, info = model.transcribe(audio, **params)
+                segments, info = self._run_model(model, audio, params, cfg, duration)
                 texts: list[str] = []
                 detected = ""
                 for segment in segments:
@@ -333,7 +375,6 @@ class WhisperTranscriber:
 
         latency = time.monotonic() - started
         text = " ".join(texts).strip()
-        duration = float(getattr(audio, "size", 0)) / float(cfg.sample_rate or 16000)
         result = TranscriptionResult(
             text=text,
             language=detected or (getattr(info, "language", "") or ""),

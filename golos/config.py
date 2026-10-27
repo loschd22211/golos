@@ -22,8 +22,13 @@ MODEL_LABELS = {
     "large-v3": "large-v3 — максимум точности, нужен мощный ПК/GPU",
 }
 
+# «ru+en» — то, что нужно на практике: русская речь с английскими терминами
+# («сделай commit и push»). Модель многоязычная и определяет язык каждого куска
+# сама, а если уверенности нет — кусок переспрашивается по-русски, чтобы текст
+# всё равно был, а не пропадал.
 LANGUAGES = {
-    "ru": "Русский (по умолчанию)",
+    "ru+en": "Русский + английский (смешанная речь)",
+    "ru": "Только русский",
     "auto": "Авто — определять по речи",
     "en": "Только английский",
 }
@@ -33,7 +38,7 @@ INSERT_METHODS = {
     "type": "Печать посимвольно (буква за буквой)",
 }
 
-CONFIG_VERSION = 4
+CONFIG_VERSION = 6
 
 DEVICES = ("auto", "cpu", "cuda")
 COMPUTE_TYPES = ("auto", "int8", "int8_float16", "float16", "float32")
@@ -124,11 +129,10 @@ class Config:
     model: str = "auto"
     device: str = "auto"
     compute_type: str = "auto"
-    # Русский по умолчанию. С «auto» на коротких кусках Whisper постоянно
-    # принимал русскую речь за английскую и писал «Fiking», «Thank you»,
-    # «Ok. It's good.» вместо сказанного. Английские термины («commit», «push»)
-    # при language="ru" всё равно распознаются — они в словаре модели.
-    language: str = "ru"
+    # Смешанная речь по умолчанию: русский + английский в одной фразе. Язык
+    # определяется по каждому куску отдельно, а неуверенный кусок
+    # переспрашивается по-русски — «как слышит», но текст не теряется.
+    language: str = "ru+en"
     beam_size: int = 3
     vad_filter: bool = True
     condition_on_previous_text: bool = False
@@ -159,7 +163,10 @@ class Config:
     pin_target: bool = True
     sound_feedback: bool = True
     notifications: bool = True
-    autostart: bool = False
+    # Запуск при входе в Windows по умолчанию включён: иначе программу
+    # запускают вручную через run.bat, хотя это обычное фоновое приложение.
+    # На других ОС настройка ничего не делает.
+    autostart: bool = True
     # Права администратора: без них Windows не пускает текст в окна, которые
     # запущены от администратора (частая история с браузером). Приложение
     # само попросит UAC при запуске — отключается здесь или ключом --no-admin.
@@ -181,7 +188,7 @@ class Config:
         self.model = _pick(self.model, MODELS, "auto")
         self.device = _pick(self.device, DEVICES, "auto")
         self.compute_type = _pick(self.compute_type, COMPUTE_TYPES, "auto")
-        self.language = _pick(self.language, tuple(LANGUAGES), "ru")
+        self.language = _pick(self.language, tuple(LANGUAGES), "ru+en")
         self.insert_method = _pick(self.insert_method, tuple(INSERT_METHODS), "paste")
 
         self.hotkey = str(self.hotkey or "").strip() or "ctrl+alt+space"
@@ -246,11 +253,16 @@ def load_config(path: Path | None = None) -> tuple[Config, Path | None]:
             # 1.4.0 включал акрил по умолчанию — он и давал «серый квадрат».
             if abs(float(getattr(config, "overlay_opacity", 0.0)) - 0.93) < 1e-6:
                 config.overlay_opacity = 0.94
-        if raw.get("language") == "auto" and saved_version < 2:
-            # Версии до 1.3.1 всегда писали "auto": на коротких кусках это
-            # принимало русскую речь за английскую. Меняем один раз; осознанный
-            # выбор "auto" в настройках сохраняется вместе с config_version.
-            config.language = "ru"
+        if saved_version < 6 and raw.get("autostart") is False:
+            # Автозапуск был выключен «по умолчанию», из-за чего программу
+            # запускали руками. Включаем один раз; галочку в настройках
+            # («Запускать с Windows») можно снять в любой момент.
+            config.autostart = True
+        if saved_version < 5 and raw.get("language") in ("ru", "auto"):
+            # 1.5.2: один язык больше не навязывается — русский с английскими
+            # терминами идёт как смешанная речь. Осознанный «Только английский»
+            # не трогаем, а «Только русский» / «Авто» переводим один раз.
+            config.language = "ru+en"
         if "streaming" not in raw:
             # Конфиг от версии без потокового режима: там по умолчанию стояла
             # тяжёлая модель medium, из-за неё запуск занимал десятки секунд.

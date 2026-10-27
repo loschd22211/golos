@@ -200,7 +200,7 @@ def test_settings_dialog_applies_changes(ui):
     dialog = ui["module"].SettingsDialog(root, app, overlay)
 
     dialog.model.set("base — быстро")
-    dialog.lang.set("Русский")
+    dialog.lang.set("Только русский")
     dialog.method.set("Посимвольно")
     dialog.mic.set("2: USB Headset")
     dialog.hotkey.set("ctrl+shift+d")

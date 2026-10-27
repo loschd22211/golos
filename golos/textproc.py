@@ -220,6 +220,14 @@ def looks_like_loop(text: str) -> bool:
 
 
 # --------------------------------------------------- галлюцинации распознавания
+# Хвост подсказки-промпта, который Whisper «эхом» дописывает в текст.
+_PROMPT_ECHO = (
+    "смешанная русская и английская речь",
+    "английские слова записываются латиницей",
+    "пример: открой github",
+)
+
+
 # Whisper на тишине, шуме и обрывках фраз «вспоминает» титры и заставки из
 # обучающих данных. По-русски это чаще всего «Редактор субтитров А.Семкин
 # Корректор В.Сухиашвили», «Продолжение следует», «Спасибо за просмотр».
@@ -256,6 +264,8 @@ _HALLUCINATION_MARKERS = (
     "музыка в наушниках",
     "музыкальный трек",
     "плейлист",
+    # Эхо подсказки (initial_prompt) из версий 1.0–1.2.
+    *_PROMPT_ECHO,
 )
 
 # Целый кусок, состоящий только из такого «слова», — почти наверняка артефакт.
@@ -303,6 +313,57 @@ def is_short_phantom(text: str) -> bool:
     return bool(words) and len(words) <= 2 and all(
         word in _HALLUCINATION_ONLY for word in words
     )
+
+
+_WORD_STRIP = " \t\n.,!?…-—:;\"'()[]{}«»"
+
+
+def _plain_words(text: str) -> list[str]:
+    return [
+        word.strip(_WORD_STRIP).lower().replace("ё", "е")
+        for word in (text or "").replace("\n", " ").split()
+        if word.strip(_WORD_STRIP)
+    ]
+
+
+def strip_repeated_prefix(text: str, committed: str, max_words: int = 12) -> str:
+    """Убрать начало куска, если оно повторяет конец уже вставленного текста.
+
+    Поток режет запись на куски, и куски перекрываются: хвост предыдущего
+    попадает в следующий («Всё нормально. | Всё нормально. Как дела?»). Без
+    этой чистки одна и та же фраза уходила в поле ввода десятки раз.
+    """
+    if not text or not committed:
+        return text
+    new_words = (text or "").replace("\n", " ").split()
+    old_words = (committed or "").replace("\n", " ").split()
+    if not new_words or not old_words:
+        return text
+    new_plain = _plain_words(text)
+    old_plain = _plain_words(committed)
+    limit = min(len(new_plain), len(old_plain), max(1, int(max_words)))
+    for size in range(limit, 0, -1):
+        if old_plain[-size:] == new_plain[:size]:
+            return " ".join(new_words[size:])
+    return text
+
+
+def _repeat_key(text: str) -> str:
+    return _squash(text).strip(" .,!?…-—:;\"'()[]{}«»")
+
+
+def repeats_recent(text: str, recent: list[str], limit: int = 2) -> bool:
+    """Повторялся ли такой кусок в недавних вставках слишком часто.
+
+    Ловит не только повторы подряд («Понимаешь.» каждый кусок), но и «качели»,
+    когда модель вставляет одну и ту же фразу через раз.
+    """
+    key = _repeat_key(text)
+    if not key:
+        return False
+    if len(key.split()) > 6:  # длинные фразы повторяются законно
+        return False
+    return sum(1 for item in recent if _repeat_key(item) == key) >= limit
 
 
 def drop_hallucinations(text: str) -> str:

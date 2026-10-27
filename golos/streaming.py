@@ -25,7 +25,13 @@ import threading
 from .audio import MicrophoneRecorder, boost_quiet
 from .config import Config
 from .inject import InjectionError, TextInjector
-from .textproc import clean_text, is_short_phantom, looks_like_hallucination
+from .textproc import (
+    clean_text,
+    is_short_phantom,
+    looks_like_hallucination,
+    repeats_recent,
+    strip_repeated_prefix,
+)
 from .transcribe import TranscriptionError, WhisperTranscriber
 
 log = logging.getLogger(__name__)
@@ -75,6 +81,8 @@ class StreamingDictator:
         self._fatal = False          # вставка невозможна: сеанс прекращаем
         self._last_chunk = ""        # предыдущий вставленный кусок
         self._same_chunk = 0         # сколько раз подряд он повторился
+        self._recent: list[str] = []  # последние вставленные куски (окно повторов)
+        self._final_audio = None     # звук, снятый в момент остановки
         self.chunks_inserted = 0
 
     # ------------------------------------------------------------------ state
@@ -106,6 +114,9 @@ class StreamingDictator:
         self._fatal = False
         self._last_chunk = ""
         self._same_chunk = 0
+        self._recent = []
+        # Важно: без сброса второй сеанс дораспознал бы стоп-звук прошлого.
+        self._final_audio = None
         begin = getattr(self.transcriber, "begin_session", None)
         if callable(begin):  # язык «auto» фиксируется один раз на сеанс
             begin()
@@ -118,10 +129,17 @@ class StreamingDictator:
             self.config.hold_back_seconds,
         )
 
-    def stop(self) -> str:
-        """Завершить: дораспознать остаток и вставить его."""
+    def stop(self, audio=None) -> str:
+        """Завершить: дораспознать остаток и вставить его.
+
+        ``audio`` — звук, снятый в момент остановки. Нужен, чтобы микрофон
+        можно было выключить сразу: раньше движок дожидался конца обработки,
+        микрофон продолжал висеть включённым, а интерфейс — замирать.
+        """
         if not self._active:
             return self.committed_text
+        if audio is not None:
+            self._final_audio = audio
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=25)
@@ -162,7 +180,9 @@ class StreamingDictator:
             if self._cancelled:
                 return
 
-            audio = self.recorder.snapshot()
+            audio = self._final_audio
+            if audio is None:
+                audio = self.recorder.snapshot()
             if audio is not None and audio.size > self._committed_samples:
                 tail = audio[self._committed_samples :]
                 if tail.size >= int(cfg.sample_rate * 0.25):
@@ -223,7 +243,7 @@ class StreamingDictator:
                 model_audio,
                 cfg,
                 initial_prompt=self._context_prompt(),
-                beam_size=1 if not final else None,
+                beam_size=1,  # в потоке скорость важнее: тот же луч, что и в середине
             )
         except TranscriptionError:
             raise
@@ -318,6 +338,22 @@ class StreamingDictator:
             self._commit(rate, ready[-1]["end"])
             return
 
+        # Та же короткая фраза, но не подряд («Понимаешь.» через раз) — тоже
+        # зацикливание модели, а не речь: в журнале такая строка повторялась
+        # десятки раз за сеанс.
+        if repeats_recent(text, self._recent):
+            log.info("Поток: кусок %r уже вставлялся недавно — пропущен", text[:40])
+            self._commit(rate, ready[-1]["end"])
+            return
+
+        # Куски часто перекрываются: модель повторяет хвост уже вставленного
+        # («Всё нормально. Было всё нормально.») — убираем этот повтор.
+        text = strip_repeated_prefix(text, self._committed_text)
+        if not text.strip():
+            log.info("Поток: кусок полностью повторяет вставленное — пропущен")
+            self._commit(rate, ready[-1]["end"])
+            return
+
         end = ready[-1]["end"]
         log.info(
             "Поток: вставляю %.2f c текста (%s): %r",
@@ -338,6 +374,8 @@ class StreamingDictator:
                 return
             with self._lock:
                 self._committed_text += text
+                self._recent.append(text)
+                del self._recent[:-12]
             self.chunks_inserted += 1
             self.on_text(text)
 

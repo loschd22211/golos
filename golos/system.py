@@ -143,6 +143,90 @@ def is_autostart_enabled() -> bool:
         return False
 
 
+# --------------------------------------------------------------------- ярлыки
+SHORTCUT_NAME = "Голос.lnk"
+
+
+def _launch_target() -> tuple[str, str, str]:
+    """(программа, аргументы, папка) для ярлыка — без консоли."""
+    script = Path(sys.argv[0]).resolve()
+    if getattr(sys, "frozen", False):  # собранный .exe
+        return str(Path(sys.executable).resolve()), "", str(Path(sys.executable).parent)
+    exe = Path(sys.executable)
+    pythonw = exe.with_name("pythonw.exe")
+    runner = pythonw if pythonw.exists() else exe
+    return str(runner), f'"{script}"', str(script.parent)
+
+
+def shortcut_dirs() -> list[Path]:
+    """Куда класть ярлык: рабочий стол и меню «Пуск»."""
+    if not autostart_supported():
+        return []
+    dirs: list[Path] = []
+    for env, suffix in (
+        ("USERPROFILE", "Desktop"),
+        ("APPDATA", r"Microsoft\Windows\Start Menu\Programs"),
+    ):
+        base = os.environ.get(env)
+        if not base:
+            continue
+        path = Path(base) / suffix
+        if path.is_dir():
+            dirs.append(path)
+    return dirs
+
+
+def shortcut_exists() -> bool:
+    return any((folder / SHORTCUT_NAME).exists() for folder in shortcut_dirs())
+
+
+def create_shortcuts() -> list[Path]:
+    """Создать ярлык «Голос» на рабочем столе и в «Пуске».
+
+    Нужно для запуска двойным щелчком: без ярлыка человек каждый раз лезет в
+    консоль с ``run.bat``, а это не то, что ждёшь от обычной программы.
+    Выполняется через WScript.Shell — тот же способ, что в install.ps1.
+    """
+    if not autostart_supported():
+        return []
+    exe, arguments, workdir = _launch_target()
+    icon = Path(workdir) / "assets" / "golos.ico"
+    created: list[Path] = []
+    for folder in shortcut_dirs():
+        link = folder / SHORTCUT_NAME
+        script = (
+            "$ErrorActionPreference='Stop';"
+            "$s=New-Object -ComObject WScript.Shell;"
+            f"$l=$s.CreateShortcut('{link}');"
+            f"$l.TargetPath='{exe}';"
+            f"$l.Arguments='{arguments}';"
+            f"$l.WorkingDirectory='{workdir}';"
+            + (f"$l.IconLocation='{icon},0';" if icon.exists() else "")
+            + "$l.Description='Голос — диктовка в любое поле ввода';"
+            "$l.Save()"
+        )
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode == 0 and link.exists():
+                created.append(link)
+                log.info("Ярлык создан: %s", link)
+            else:
+                log.warning(
+                    "Не удалось создать ярлык %s: %s",
+                    link,
+                    (result.stderr or result.stdout or "").strip()[:200],
+                )
+        except Exception as exc:  # pragma: no cover - Windows/PowerShell
+            log.warning("Не удалось создать ярлык %s: %s", link, exc)
+    return created
+
+
 def show_message(title: str, message: str) -> None:
     """Показать сообщение даже без консоли (pythonw её не имеет).
 

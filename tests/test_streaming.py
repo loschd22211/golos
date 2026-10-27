@@ -426,8 +426,9 @@ def test_injection_error_stops_the_session():
 def test_repeating_chunk_is_not_inserted_forever():
     """Whisper зацикливается на шуме и выдаёт один и тот же кусок.
 
-    В журнале пользователя так появились десятки подряд «Понимаешь.» —
-    третий одинаковый кусок подряд вставлять нельзя.
+    В журнале пользователя так появились десятки подряд «Понимаешь.»:
+    второй такой кусок — уже повтор конца вставленного текста, и он
+    отбрасывается целиком (раньше пропускался только третий).
     """
 
     cfg = Config()
@@ -444,8 +445,8 @@ def test_repeating_chunk_is_not_inserted_forever():
     for _ in range(5):
         stream._process_tail(audio, final=False)
 
-    assert len(injector.inserted) == 2  # третий и последующие повторы отброшены
-    assert stream.chunks_inserted == 2
+    assert len(injector.inserted) == 1  # повторы того же куска не вставляются
+    assert stream.chunks_inserted == 1
 
 
 def test_different_chunks_are_all_inserted():

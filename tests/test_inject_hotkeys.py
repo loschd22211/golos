@@ -51,6 +51,28 @@ def test_paste_puts_text_in_clipboard_and_sends_ctrl_v():
     assert keyboard.sent == ["ctrl+v"]
 
 
+def test_unknown_target_keeps_text_in_clipboard():
+    """Нет окна-получателя — текст остаётся в буфере, а не пропадает."""
+    clipboard = FakeClipboard("прежнее")
+    keyboard = FakeKeyboard()
+    injector = make_injector(clipboard, keyboard, restore_clipboard=True, focus=lambda: False)
+
+    assert injector.insert("Привет мир") is True
+    assert clipboard.text == "Привет мир"
+    assert keyboard.sent == []
+    assert injector.kept_in_clipboard is True
+
+
+def test_known_target_pastes_as_usual():
+    clipboard = FakeClipboard("прежнее")
+    keyboard = FakeKeyboard()
+    injector = make_injector(clipboard, keyboard, restore_clipboard=True, focus=lambda: True)
+
+    injector.insert("Привет мир")
+    assert keyboard.sent == ["ctrl+v"]
+    assert injector.kept_in_clipboard is False
+
+
 def test_clipboard_restored():
     clipboard = FakeClipboard("прежнее")
     injector = make_injector(clipboard, FakeKeyboard(), method="paste", restore_clipboard=True)

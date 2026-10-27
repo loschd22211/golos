@@ -24,7 +24,13 @@ from golos.app import ERROR, DictationApp, NullUi
 from golos.config import AppPaths, load_config
 from golos.logsetup import setup_logging
 from golos.hotkeys import pretty_hotkey
-from golos.system import SingleInstance, open_path, show_message
+from golos.system import (
+    SingleInstance,
+    create_shortcuts,
+    open_path,
+    shortcut_exists,
+    show_message,
+)
 from golos import elevate, winfocus
 
 log = logging.getLogger("golos")
@@ -153,6 +159,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="не запрашивать права администратора (в админские окна текст не вставится)",
     )
+    parser.add_argument("--make-shortcut", "--shortcut", dest="make_shortcut",
+                        action="store_true",
+                        help="создать ярлык «Голос» на рабочем столе и в меню «Пуск»")
     parser.add_argument("--status", action="store_true",
                         help="только проверить, запущен ли «Голос» (для скриптов)")
     parser.add_argument("--version", action="version", version=f"{APP_TITLE} {__version__}")
@@ -161,6 +170,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.make_shortcut:
+        created = create_shortcuts()
+        if created:
+            show_message(
+                APP_TITLE,
+                "Ярлык готов — запускайте «Голос» двойным щелчком:\n"
+                + "\n".join(str(item) for item in created),
+            )
+            return 0
+        show_message(
+            APP_TITLE,
+            "Не удалось создать ярлык. Запустите один раз install.bat — "
+            "он сделает ярлык сам.",
+        )
+        return 1
 
     if args.status:
         # Используется run.bat: 0 — уже работает, 1 — не запущен.
@@ -222,6 +247,13 @@ def main(argv: list[str] | None = None) -> int:
         preload=config.preload_model and not args.no_preload,
     )
 
+    # Ярлык нужен не для красоты: без него программу запускают вручную через
+    # run.bat. Создаём один раз в фоне, чтобы не задерживать старт.
+    if not args.no_gui and not shortcut_exists():
+        threading.Thread(
+            target=create_shortcuts, name="golos-shortcut", daemon=True
+        ).start()
+
     try:
         if args.no_gui:
             return _run_console(app, single)
@@ -269,6 +301,21 @@ def _run_console(app: DictationApp, single: SingleInstance) -> int:
     finally:
         app.stop()
     return 0
+
+
+def _target_hwnd(tracker) -> int:
+    """Окно-получатель для проверки прав; 0 — если его пока не знаем.
+
+    ``resolve_target`` отсекает нашу собственную плашку: она не поле ввода,
+    и текст в неё уходить не должен ни при каких обстоятельствах.
+    """
+    resolve = getattr(tracker, "resolve_target", None)
+    if callable(resolve):
+        try:
+            return int(resolve() or 0)
+        except Exception as exc:  # pragma: no cover - только Windows
+            log.debug("Не удалось определить окно-получатель: %s", exc)
+    return int(getattr(tracker, "hwnd", 0) or 0)
 
 
 def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance) -> int:
@@ -324,7 +371,7 @@ def _run_gui(app: DictationApp, args: argparse.Namespace, single: SingleInstance
     app.tracker = tracker
     app.focus_hook = tracker.activate
     # Проверку прав делаем именно для окна-цели: активным мог оказаться оверлей.
-    app.injector.guard = lambda: elevate.insertion_guard(tracker.hwnd)
+    app.injector.guard = lambda: elevate.insertion_guard(_target_hwnd(tracker))
     # В момент старта диктовки обновляем цель: пользователь мог переключиться.
     original_toggle = app.toggle
 

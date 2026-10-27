@@ -18,7 +18,7 @@ from .audio import AudioError, MicrophoneRecorder, Recording
 from .config import AppPaths, Config, save_config
 from .hotkeys import HotkeyManager, normalize_hotkey
 from .inject import InjectionError, TextInjector
-from .system import beep, set_autostart
+from .system import beep, is_autostart_enabled, set_autostart
 from .streaming import StreamingDictator
 from .textproc import clean_text, preview
 from .transcribe import TranscriptionError, WhisperTranscriber
@@ -149,11 +149,16 @@ class DictationApp:
         self._preload = preload
         self._stop_event = threading.Event()
         self._config_lock = threading.Lock()
+        # Финальный проход после остановки идёт в фоне; пока он не закончился,
+        # новый сеанс не начинаем.
+        self._finishing = threading.Event()
+        self._finish_thread: threading.Thread | None = None
 
     # ---------------------------------------------------------------- lifecycle
     def start(self) -> None:
         """Зарегистрировать клавиши и (опционально) прогреть модель."""
         self._bind_hotkeys()
+        self._sync_autostart()
         self._set_state(IDLE)
         if self._preload:
             self.preload_async()
@@ -161,6 +166,11 @@ class DictationApp:
     def stop(self) -> None:
         self._stop_event.set()
         try:
+            # Сначала даём фоновому финальному проходу закончить: иначе отмена
+            # вырвет звук из-под него и последняя фраза потеряется.
+            thread = self._finish_thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=3.0)
             if self.stream.is_active:
                 self.stream.cancel()
             if self.recorder.is_recording:
@@ -174,6 +184,22 @@ class DictationApp:
     @property
     def is_recording(self) -> bool:
         return self.recorder.is_recording
+
+    def _sync_autostart(self) -> None:
+        """Привести автозапуск Windows в соответствие с настройкой.
+
+        Раньше запись в реестр появлялась только при переключении галочки,
+        поэтому «Запускать с Windows» могло быть включено, а автозапуска не
+        было — и программу запускали вручную каждый раз.
+        """
+        try:
+            enabled = is_autostart_enabled()
+            if bool(self.config.autostart) and not enabled:
+                set_autostart(True)
+            elif not self.config.autostart and enabled:
+                set_autostart(False)
+        except Exception as exc:  # pragma: no cover - только Windows
+            log.debug("Автозапуск не синхронизирован: %s", exc)
 
     def _bind_hotkeys(self) -> None:
         bindings = {"toggle": (self.config.hotkey, self.toggle)}
@@ -199,6 +225,11 @@ class DictationApp:
             return False
         if self.state == PROCESSING:
             self.ui.on_notify("Голос", "Дождитесь окончания распознавания")
+            return False
+        # Хвост прошлой записи ещё дораспознаётся тем же движком: второй сеанс
+        # поверх него потеряет текст, поэтому честно ждём долю секунды.
+        if self._finishing.is_set():
+            self.ui.on_notify("Голос", "Договариваю последнюю фразу — секунду…")
             return False
 
         try:
@@ -228,24 +259,20 @@ class DictationApp:
         self._unregister_cancel_hotkey()
 
         if self.config.streaming and self.stream.is_active:
-            self._set_state(PROCESSING)
-            text = self.stream.stop()
-            recording = self.recorder.stop()
+            # Звук забираем ДО выключения микрофона: recorder.stop() очищает
+            # буфер, и потоковому движку достался бы пустой хвост.
+            snapshot = getattr(self.recorder, "snapshot", None)
+            audio = snapshot() if callable(snapshot) else None
+            recording = self.recorder.stop()   # микрофон гаснет сразу
             if self.config.sound_feedback:
                 beep("stop")
-            duration = recording.duration if recording else 0.0
-            if text.strip():
-                self.last_text = text
-                self._append_history(text)
-                self._update_stats(text, duration, 0.0)
-                if self.config.notifications:
-                    self.ui.on_notify("Голос", preview(text))
-            elif duration < self.config.min_duration or not recording:
-                self.ui.on_notify("Голос", "Слишком короткая запись")
-            else:
-                self.ui.on_notify(
-                    "Голос", "Речь не распознана — проверьте микрофон и модель"
-                )
+            # Интерфейс свободен немедленно: раньше здесь синхронно ждали
+            # финальный проход модели, и плашка «Распознаю…» висела ~20 с
+            # (а горячая клавиша всё это время не реагировала).
+            # Флаг ставим ДО перехода в IDLE: пока хвост дораспознаётся, окно-
+            # получатель остаётся закреплённым, иначе последняя фраза уехала бы
+            # в то окно, куда человек уже переключился.
+            self._finish_stream_async(audio, recording)
             self._set_state(IDLE)
             return
 
@@ -276,6 +303,43 @@ class DictationApp:
             target=self._process, args=(recording,), name="golos-transcribe", daemon=True
         )
         thread.start()
+
+    def _finish_stream_async(self, audio, recording) -> None:
+        """Дораспознать остаток записи в фоне, не задерживая интерфейс."""
+        duration = recording.duration if recording else 0.0
+        self._finishing.set()
+        thread = threading.Thread(
+            target=self._finish_stream,
+            args=(audio, duration),
+            name="golos-stream-finish",
+            daemon=True,
+        )
+        self._finish_thread = thread
+        thread.start()
+
+    def _finish_stream(self, audio, duration: float) -> None:
+        try:
+            text = self.stream.stop(audio=audio)
+            if text.strip():
+                self.last_text = text
+                self._append_history(text)
+                self._update_stats(text, duration, 0.0)
+                if self.config.notifications:
+                    self.ui.on_notify("Голос", preview(text))
+            elif duration < self.config.min_duration or duration <= 0:
+                self.ui.on_notify("Голос", "Слишком короткая запись")
+            else:
+                self.ui.on_notify(
+                    "Голос", "Речь не распознана — проверьте микрофон и модель"
+                )
+        except Exception as exc:  # pragma: no cover - неожиданное
+            log.exception("Не удалось завершить поток")
+            self._fail(f"Сбой распознавания: {exc}")
+        finally:
+            # Только теперь диктовка правда закончилась: снимаем закрепление
+            # окна и разрешаем новый сеанс.
+            self._unpin_target()
+            self._finishing.clear()
 
     def cancel_recording(self) -> None:
         if not self.recorder.is_recording:
@@ -535,8 +599,9 @@ class DictationApp:
         self._fail(message)
 
     def _set_state(self, state: str, message: str = "") -> None:
-        if state == IDLE:
+        if state == IDLE and not self._finishing.is_set():
             # Диктовка закончилась — окно-получатель снова не закреплено.
+            # Пока идёт фоновый финальный проход, закрепление сохраняется.
             self._unpin_target()
         self.state = state
         if state != ERROR:

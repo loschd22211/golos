@@ -19,11 +19,17 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Пакеты PyPI, внутри которых лежат нужные библиотеки.
+# Пакеты PyPI, внутри которых лежат нужные библиотеки. Точки входа пишем
+# списком: у разных версий пакета DLL лежат то в ``bin``, то в ``lib``.
 PACKAGE_DIRS = (
     ("nvidia", "cublas", "bin"),
+    ("nvidia", "cublas", "lib"),
     ("nvidia", "cudnn", "bin"),
+    ("nvidia", "cudnn", "lib"),
 )
+# Что именно ищем: без этих файлов ctranslate2 не поднимет CUDA.
+NEEDED_DLLS = ("cublas64_12.dll", "cublasLt64_12.dll")
+DLL_GLOBS = ("nvidia/*/bin", "nvidia/*/lib", "nvidia/*/*/bin", "nvidia/*/*/lib")
 PIP_PACKAGES = ("nvidia-cublas-cu12", "nvidia-cudnn-cu12")
 
 _enabled = False
@@ -55,7 +61,25 @@ def candidate_dirs() -> list[Path]:
             path = root.joinpath(*parts)
             if path.is_dir() and path not in dirs:
                 dirs.append(path)
+        # Страховка от нестандартной раскладки пакетов: ищем каталоги с DLL.
+        for pattern in DLL_GLOBS:
+            for path in root.glob(pattern):
+                if path.is_dir() and path not in dirs:
+                    dirs.append(path)
     return dirs
+
+
+def has_cublas(dirs: list[Path] | None = None) -> bool:
+    """Лежит ли cublas64_12.dll в найденных папках (или рядом с Python)."""
+    checked = dirs if dirs is not None else candidate_dirs()
+    for path in checked:
+        try:
+            names = {item.name.lower() for item in path.iterdir()}
+        except OSError:  # pragma: no cover
+            continue
+        if any(name in names for name in (d.lower() for d in NEEDED_DLLS)):
+            return True
+    return False
 
 
 def enable_dlls() -> list[str]:
@@ -85,9 +109,21 @@ def enable_dlls() -> list[str]:
 
     _found = found
     if found:
-        log.info("Библиотеки CUDA подключены из pip: %s", ", ".join(found))
+        if has_cublas([Path(item) for item in found]):
+            log.info("Библиотеки CUDA подключены из pip: %s", ", ".join(found))
+        else:
+            log.warning(
+                "Папки nvidia найдены, но cublas64_12.dll в них нет: %s. "
+                "Поставьте библиотеки заново: %s",
+                ", ".join(found),
+                pip_hint(),
+            )
     else:
-        log.debug("CUDA-библиотеки из pip не найдены")
+        log.info(
+            "Библиотеки CUDA из pip не найдены (видеокарта останется без "
+            "ускорения). Установить: %s",
+            pip_hint(),
+        )
     return list(found)
 
 

@@ -411,6 +411,19 @@ class TargetTracker:
     def hwnd(self) -> int:
         return self._pinned or self._hwnd
 
+    def resolve_target(self) -> int:
+        """Окно, в которое реально пойдёт текст (0 — такого нет).
+
+        Наше собственное окно целью быть не может: плашка «Голос» и её
+        pythonw.exe не поле ввода. Раньше при пустом трекере в журнале
+        появлялось «Вставка в окно: «Голос» (pythonw.exe…)», и текст уходил
+        в собственную плашку.
+        """
+        for candidate in (self._pinned, self._hwnd):
+            if candidate and is_window(candidate) and not is_our_window(candidate):
+                return int(candidate)
+        return 0
+
     @property
     def pinned(self) -> int:
         """Окно, закреплённое под текущую диктовку (0 — не закреплено)."""
