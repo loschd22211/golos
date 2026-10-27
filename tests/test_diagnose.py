@@ -398,6 +398,7 @@ def test_target_window_check_reports_target(monkeypatch, capsys):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(winfocus.TargetTracker, "remember_current", lambda self: True)
     monkeypatch.setattr(winfocus.TargetTracker, "hwnd", property(lambda self: 4242))
+    monkeypatch.setattr(winfocus.TargetTracker, "resolve_target", lambda self: 4242)
     monkeypatch.setattr(winfocus, "get_foreground_window", lambda: 4242)
     monkeypatch.setattr(winfocus, "is_our_window", lambda hwnd: False)
 
@@ -438,8 +439,8 @@ def test_fix_enables_gpu_when_cuda_works(tmp_path, capsys):
     assert data["compute_type"] == "auto"
 
 
-def test_fix_pins_russian_language(monkeypatch, tmp_path, capsys, no_deps):
-    """«auto» путал русскую речь с английской — --fix ставит ru."""
+def test_fix_pins_mixed_language(monkeypatch, tmp_path, capsys, no_deps):
+    """--fix ставит смешанную речь: русский + английский в одной фразе."""
     appdata = tmp_path / "appdata" / "Golos"
     appdata.mkdir(parents=True)
     (appdata / "config.json").write_text(json.dumps({"language": "auto"}), encoding="utf-8")
@@ -448,7 +449,7 @@ def test_fix_pins_russian_language(monkeypatch, tmp_path, capsys, no_deps):
     capsys.readouterr()
 
     data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
-    assert data["language"] == "ru"
+    assert data["language"] == "ru+en"
 
 
 def test_verdict_is_printed_by_python(monkeypatch, tmp_path, capsys, no_deps):

@@ -204,7 +204,9 @@ def check_gpu(config) -> bool:
             "видеокарта есть, но не хватает cublas64_12.dll",
             "модель уйдёт на CPU — это в разы медленнее",
         )
-        print(f"     Быстрое решение без CUDA Toolkit: .venv\\Scripts\\python.exe -m {pip_hint()}")
+        print("     Быстрое решение без CUDA Toolkit:")
+        print(f"       {pip_hint()}   (в .venv)")
+        print("     «Голос» подхватит эти DLL сам, без установки CUDA Toolkit.")
         print("     (или запустите install.bat заново — он поставит их сам).")
         print("     Если видеокарта не нужна: \"device\": \"cpu\" (так сделает --fix).")
         return False
@@ -251,8 +253,9 @@ def check_target_window() -> None:
         tracker = winfocus.TargetTracker()
         tracker.remember_current()
         print(f"     сейчас активно: {elevate.describe_window()}")
-        if tracker.hwnd:
-            print(f"     цель вставки:   {elevate.describe_window(tracker.hwnd)}")
+        target = tracker.resolve_target()
+        if target:
+            print(f"     цель вставки:   {elevate.describe_window(target)}")
             say(OK, "окно-получатель определено", "текст пойдёт туда")
         else:
             say(
@@ -265,6 +268,38 @@ def check_target_window() -> None:
             print("      трекер цели всё равно печатает в последнее чужое окно)")
     except Exception as exc:
         say(WARN, "проверка окна не удалась", str(exc))
+
+
+def check_launch() -> None:
+    """Ярлык и автозапуск: запуск без ручного run.bat каждый раз."""
+    section("Запуск (ярлык и автозапуск)")
+    import sys
+
+    try:
+        from golos import system
+    except Exception as exc:  # pragma: no cover
+        say(WARN, "проверка запуска недоступна", str(exc))
+        return
+    if not system.autostart_supported():
+        say(WARN, "проверка только для Windows", sys.platform)
+        return
+
+    if system.shortcut_exists():
+        say(OK, "ярлык «Голос» есть", "запуск двойным щелчком, без консоли")
+    else:
+        say(
+            WARN,
+            "ярлыка нет — программу запускают вручную через run.bat",
+            "создать: .\\run.bat --make-shortcut (или install.bat)",
+        )
+    if system.is_autostart_enabled():
+        say(OK, "автозапуск с Windows включён", "«Голос» поднимется сам")
+    else:
+        say(
+            WARN,
+            "автозапуск выключен",
+            "включить: настройки плашки → «Запускать с Windows»",
+        )
 
 
 def check_packages() -> None:
@@ -318,7 +353,10 @@ def check_config(appdata: Path) -> tuple:
                 "текст появится только после остановки записи — doctor.bat --fix включит её")
         if config.language == "ru":
             say(WARN, "язык жёстко русский",
-                "английские слова будут записаны кириллицей — для смешанной речи поставьте auto")
+                "английские слова будут записаны кириллицей — для смешанной "
+                "речи поставьте «Русский + английский»")
+        elif config.language == "ru+en":
+            say(OK, "смешанная речь", "русский + английский в одной фразе")
         if config.model in ("medium", "large-v3"):
             say(WARN, f"модель {config.model} тяжёлая",
                 "на процессоре первый текст появится через минуты — поставьте small")
@@ -660,11 +698,11 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
             "beam_size": 3,
         }
     )
-    # «auto» на коротких кусках путал русскую речь с английской
-    # («Fiking», «Thank you») — фиксируем русский, английские термины
-    # модель всё равно знает. Кому нужно иначе — «Только английский».
+    # Смешанная речь — рабочий вариант по умолчанию: русские слова и
+    # английские термины в одной фразе. Осознанный выбор одного языка
+    # («ru» / «en») не трогаем.
     if data.get("language") not in ("ru", "en"):
-        data["language"] = "ru"
+        data["language"] = "ru+en"
     if data.get("streaming") is not True:
         data["streaming"] = True
     if cuda_ok:
@@ -724,6 +762,7 @@ def main(argv: list[str] | None = None) -> int:
     config, raw = check_config(appdata)
     check_rights()
     check_target_window()
+    check_launch()
     check_packages()
     cuda_ok = check_gpu(config)
     if args.fix:

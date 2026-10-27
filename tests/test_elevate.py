@@ -14,7 +14,7 @@ import types
 import pytest
 
 
-from golos import elevate
+from golos import elevate, winfocus
 from golos.inject import InjectionError, TextInjector
 
 
@@ -227,11 +227,32 @@ def test_guard_logs_target_window(monkeypatch, caplog):
     monkeypatch.setattr(
         elevate, "describe_window", lambda hwnd=None: "«Заметки» (notepad.exe)"
     )
+    monkeypatch.setattr(winfocus, "get_foreground_window", lambda: 4242)
+    monkeypatch.setattr(winfocus, "is_our_window", lambda hwnd=None: False)
 
     with caplog.at_level("INFO", logger="golos.elevate"):
         elevate.insertion_guard()
 
     assert "Заметки" in caplog.text
+
+
+def test_guard_never_targets_own_overlay(monkeypatch, caplog):
+    """Своя плашка — не поле ввода: её нельзя показывать как цель."""
+    monkeypatch.setattr(elevate, "_IS_WINDOWS", True)
+    monkeypatch.setattr(elevate, "foreground_is_elevated", lambda: False)
+    monkeypatch.setattr(elevate, "is_admin", lambda: False)
+    monkeypatch.setattr(
+        elevate, "describe_window", lambda hwnd=None: "«Голос» (pythonw.exe)"
+    )
+    monkeypatch.setattr(winfocus, "get_foreground_window", lambda: 777)
+    monkeypatch.setattr(winfocus, "is_our_window", lambda hwnd=None: True)
+
+    with caplog.at_level("INFO", logger="golos.elevate"):
+        elevate.insertion_guard()
+
+    # Целью окно не названо: в журнале нет строки «Вставка в окно: «Голос»…».
+    assert "Вставка в окно: «Голос»" not in caplog.text
+    assert "Окно-получатель неизвестно" in caplog.text
 
 
 def test_injector_calls_guard_before_paste():

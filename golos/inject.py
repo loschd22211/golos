@@ -137,6 +137,8 @@ class TextInjector:
         # со стороны это выглядит как «текст не вставляется».
         self.focus = focus
         self.restore_clipboard = restore_clipboard
+        # True — последняя вставка не нашла окно и осталась в буфере обмена.
+        self.kept_in_clipboard = False
         self.paste_delay = paste_delay
         self.restore_delay = restore_delay
         self.clipboard = clipboard or SystemClipboard()
@@ -155,11 +157,26 @@ class TextInjector:
             return False
         if self.guard is not None:
             self.guard()
+        focused = True
         if self.focus is not None:
             try:
-                self.focus()
+                # False — окно-получатель неизвестен (курсор не в чужом окне).
+                focused = self.focus() is not False
             except Exception as exc:  # pragma: no cover - фокус не критичен
                 log.debug("Не удалось вернуть фокус: %s", exc)
+        if not focused:
+            # Печатать некуда: вместо потери текста оставляем его в буфере
+            # обмена, чтобы человек вставил его сам (Ctrl+V).
+            try:
+                self.clipboard.set_text(text)
+                self.kept_in_clipboard = True
+                log.warning(
+                    "Окно-получатель неизвестно: текст %r оставлен в буфере обмена",
+                    text[:60],
+                )
+                return True
+            except Exception as exc:  # pragma: no cover - буфер недоступен
+                log.warning("Буфер обмена недоступен: %s", exc)
         if self.method == "type":
             return self._type(text)
         return self._paste(text)

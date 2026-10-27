@@ -98,7 +98,12 @@ MODEL_LABELS = {
     "medium": "medium — точнее (нужна видеокарта)",
     "large-v3": "large-v3 — максимум (нужен GPU)",
 }
-LANGS = {"ru": "Русский", "auto": "Авто (рус + eng)", "en": "English"}
+LANGS = {
+    "ru+en": "Русский + English (смешанная речь)",
+    "ru": "Только русский",
+    "auto": "Авто — по каждой фразе",
+    "en": "Только English",
+}
 GLASS_LEVELS = {
     "Непрозрачная": 1.0,
     "Стекло 94%": 0.94,
@@ -542,7 +547,7 @@ class SettingsDialog:
         self.win = tk.Toplevel(parent)
         self.win.title(f"{APP_TITLE} — настройки")
         self.win.configure(bg=BG)
-        self.win.geometry("460x440")
+        self.win.geometry("500x440")
         self.win.resizable(False, False)
         try:
             winfocus.clear_no_activate(self.win)
@@ -633,6 +638,9 @@ class SettingsDialog:
         tk.Button(buttons, text="Журнал", command=self.overlay.open_log, bg="#1c2333",
                   fg=TEXT, relief="flat", bd=0, padx=12, pady=6,
                   cursor="hand2").pack(side="left")
+        tk.Button(buttons, text="Ярлык на рабочий стол", command=self.make_shortcut,
+                  bg="#1c2333", fg=TEXT, relief="flat", bd=0, padx=10, pady=6,
+                  cursor="hand2").pack(side="left", padx=(6, 0))
         tk.Label(buttons, text=f"v{__version__}", bg=BG, fg=MUTED,
                  font=_font(8)).pack(side="right", padx=10)
 
@@ -668,6 +676,28 @@ class SettingsDialog:
             log.debug("Вид плашки не обновился: %s", exc)
         if warnings:
             messagebox.showwarning(APP_TITLE, "\n".join(warnings), parent=self.win)
+
+    def make_shortcut(self) -> None:
+        """Создать ярлык для запуска двойным щелчком (без run.bat)."""
+        from golos.system import create_shortcuts
+
+        try:
+            created = create_shortcuts()
+        except Exception as exc:  # pragma: no cover - Windows/PowerShell
+            log.warning("Ярлык не создан: %s", exc)
+            created = []
+        if created:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Ярлык «Голос» готов:\n" + "\n".join(str(item) for item in created),
+                parent=self.win,
+            )
+        else:
+            messagebox.showwarning(
+                APP_TITLE,
+                "Не удалось создать ярлык. Запустите install.bat — он сделает его сам.",
+                parent=self.win,
+            )
 
     def save(self) -> None:
         self.apply()

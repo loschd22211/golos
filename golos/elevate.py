@@ -170,8 +170,22 @@ def insertion_guard(hwnd=None) -> None:
     if not _IS_WINDOWS:  # pragma: no cover - не Windows
         return
 
+    if not hwnd:
+        # Трекер не знает цели. Активное окно годится, только если это не
+        # наша плашка: иначе текст уйдёт в собственный оверлей и потеряется.
+        from . import winfocus
+
+        current = winfocus.get_foreground_window()
+        if current and not winfocus.is_our_window(current):
+            hwnd = current
+        else:
+            log.warning(
+                "Окно-получатель неизвестно: активное окно — наше («Голос»). "
+                "Щёлкните в поле ввода и повторите диктовку."
+            )
+
     elevated = window_is_elevated(hwnd) if hwnd else foreground_is_elevated()
-    log.info("Вставка в окно: %s", describe_window(hwnd))
+    log.info("Вставка в окно: %s", describe_window(hwnd) if hwnd else "окно не выбрано")
 
     if elevated and not is_admin():
         from .inject import InjectionError
