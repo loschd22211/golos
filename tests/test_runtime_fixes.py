@@ -414,6 +414,54 @@ def test_session_language_never_locks_to_japanese():
     assert transcriber._session_language == "ru"
 
 
+class EmptyThenTextModel:
+    """Модель, которая с VAD «не слышит» речь, а без него — слышит."""
+
+    def __init__(self):
+        self.calls = []
+
+    def transcribe(self, audio, **params):
+        self.calls.append(params)
+        if params.get("vad_filter"):
+            return iter([]), FakeInfo("ru", 0.9)
+        return iter([FakeSegment("проверка связи")]), FakeInfo("ru", 0.9)
+
+
+def test_empty_result_is_retried_without_filters():
+    """«Модель вернула пустой текст» на живой речи: повтор без VAD и порогов."""
+    cfg = Config()
+    transcriber = WhisperTranscriber(cfg)
+    model = EmptyThenTextModel()
+    audio = np.full(16000 * 3, 0.2, dtype=np.float32)
+
+    pieces, _ = transcriber._run_model(
+        model, audio, {"vad_filter": True, "language": "ru"}, cfg, 3.0
+    )
+
+    assert len(model.calls) == 2
+    assert model.calls[1]["vad_filter"] is False
+    assert model.calls[1]["no_speech_threshold"] is None
+    assert pieces and pieces[0].text == "проверка связи"
+
+
+def test_silence_is_not_retried():
+    """Тишину повторять незачем: это лишняя работа процессора."""
+    cfg = Config()
+    transcriber = WhisperTranscriber(cfg)
+    model = EmptyThenTextModel()
+
+    pieces, _ = transcriber._run_model(
+        model,
+        np.zeros(16000 * 3, dtype=np.float32),
+        {"vad_filter": True, "language": "ru"},
+        cfg,
+        3.0,
+    )
+
+    assert len(model.calls) == 1
+    assert pieces == []
+
+
 # ----------------------------------------------------------------------- CUDA
 def test_has_cublas_detects_dll(tmp_path):
     (tmp_path / "cublas64_12.dll").write_bytes(b"")

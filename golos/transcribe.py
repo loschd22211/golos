@@ -316,32 +316,65 @@ class WhisperTranscriber:
             log.info("Язык сеанса: %s (%.2f)", detected, probability)
 
     def _run_model(self, model, audio, params: dict, cfg: Config, duration: float):
-        """Распознать кусок; при промахе с языком — повторить по-русски."""
+        """Распознать кусок с двумя подстраховками.
+
+        1. Промах определения языка (режимы «по кускам»): иероглифы и чужие
+           слова на русской речи — переспрашиваем по-русски.
+        2. Пустой результат на явной речи: VAD и пороги выбрасывают тихую или
+           шумную запись целиком («модель вернула пустой текст» в диагностике).
+           Тогда повторяем без фильтров — пусть лучше будет текст с огрехами,
+           чем пропавшая фраза.
+        """
         pieces, info = model.transcribe(audio, **params)
         pieces = list(pieces)
-        keep = " ".join((getattr(item, "text", "") or "") for item in pieces)
-        if duration < MIXED_MIN_SECONDS or not self._russian_retry_needed(
-            cfg, keep, info
-        ):
-            return pieces, info
+        keep = _text_of(pieces)
 
-        detected = getattr(info, "language", "") or "?"
-        log.info(
-            "Язык определён как %s — переспрашиваю по-русски (%r)",
-            detected,
-            keep[:60],
-        )
-        retry_params = dict(params)
-        retry_params["language"] = MIXED_FALLBACK
-        retry_pieces, retry_info = model.transcribe(audio, **retry_params)
-        retry_pieces = list(retry_pieces)
-        retry_text = " ".join((getattr(item, "text", "") or "") for item in retry_pieces)
-        if retry_text.strip() and (
-            foreign_script_ratio(retry_text) < foreign_script_ratio(keep)
-            or not keep.strip()
-        ):
-            return retry_pieces, retry_info
+        if duration >= MIXED_MIN_SECONDS and self._russian_retry_needed(cfg, keep, info):
+            log.info(
+                "Язык определён как %s — переспрашиваю по-русски (%r)",
+                getattr(info, "language", "") or "?",
+                keep[:60],
+            )
+            retry_params = dict(params)
+            retry_params["language"] = MIXED_FALLBACK
+            retry_pieces, retry_info = model.transcribe(audio, **retry_params)
+            retry_pieces = list(retry_pieces)
+            retry_text = _text_of(retry_pieces)
+            if retry_text.strip() and (
+                foreign_script_ratio(retry_text) < foreign_script_ratio(keep)
+                or not keep.strip()
+            ):
+                pieces, info, keep = retry_pieces, retry_info, retry_text
+
+        if self._empty_retry_needed(pieces, params, audio, duration):
+            log.warning(
+                "Модель не вернула текст на речи (%.1f c, пик %.3f) — "
+                "повторяю без VAD и порогов",
+                duration,
+                _peak_of(audio),
+            )
+            relaxed_pieces, relaxed_info = model.transcribe(audio, **_relaxed(params))
+            relaxed_pieces = list(relaxed_pieces)
+            if _text_of(relaxed_pieces).strip():
+                pieces, info = relaxed_pieces, relaxed_info
+                log.info(
+                    "Повтор без фильтров дал текст: %r", _text_of(pieces)[:80]
+                )
+            else:
+                log.warning(
+                    "Повтор без фильтров тоже пуст: модель не слышит речь в куске"
+                )
         return pieces, info
+
+    def _empty_retry_needed(self, pieces, params: dict, audio, duration: float) -> bool:
+        """Пустой результат при явном звуке — стоит повторить без фильтров."""
+        if any((getattr(item, "text", "") or "").strip() for item in pieces):
+            return False
+        if not params.get("vad_filter"):
+            return False
+        if duration < 0.6:
+            return False
+        return _peak_of(audio) > 0.01
 
     # -------------------------------------------------------------- transcribe
     def transcribe(self, audio, config: Config | None = None) -> TranscriptionResult:
@@ -486,6 +519,35 @@ def _is_noise_segment(segment, text: str) -> bool:
         return True
     # Совсем неуверенное распознавание короткого куска — тоже выдумка.
     return no_speech > 0.3 and avg_logprob < -1.1
+
+
+def _text_of(pieces) -> str:
+    return " ".join((getattr(item, "text", "") or "") for item in pieces)
+
+
+def _peak_of(audio) -> float:
+    """Пик звука: по нему видно, была ли речь вообще."""
+    try:
+        import numpy as np
+
+        return float(np.max(np.abs(audio))) if getattr(audio, "size", 0) else 0.0
+    except Exception:  # pragma: no cover - неожиданный тип
+        return 1.0
+
+
+def _relaxed(params: dict) -> dict:
+    """Копия параметров без фильтров: VAD и пороги выключены.
+
+    Нужна, когда модель возвращает пустоту на живой речи: тихий микрофон или
+    шум не проходят VAD, и фраза исчезает целиком.
+    """
+    relaxed = dict(params)
+    relaxed["vad_filter"] = False
+    relaxed["no_speech_threshold"] = None
+    relaxed["log_prob_threshold"] = None
+    relaxed["compression_ratio_threshold"] = None
+    relaxed["condition_on_previous_text"] = False
+    return relaxed
 
 
 def _cuda_hint(exc: Exception) -> str:
