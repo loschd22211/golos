@@ -16,7 +16,11 @@ from pathlib import Path
 
 from .cuda import enable_dlls, pip_hint
 from .config import Config
-from .textproc import is_short_phantom, looks_like_hallucination
+from .textproc import (
+    foreign_script_ratio,
+    is_short_phantom,
+    looks_like_hallucination,
+)
 
 log = logging.getLogger(__name__)
 
@@ -87,16 +91,23 @@ class WhisperTranscriber:
             return mode
         return self._session_language or None
 
-    def _russian_retry_needed(self, cfg: Config, keep: str) -> bool:
-        """Стоит ли переспросить кусок по-русски (смешанный режим).
+    def _russian_retry_needed(self, cfg: Config, keep: str, info) -> bool:
+        """Стоит ли переспросить кусок по-русски.
 
-        Так выполняется обещание «если не понял — пиши, как слышится
-        по-русски»: автоопределение оставило пустоту — не оставляем её в тексте.
+        Речь пользователя русская (с английскими терминами), поэтому любой
+        другой «язык» от модели — ошибка определения, а не реальный язык.
+        В журнале так и появились «もう、ガ サ» и «китайские иероглифы» вместо
+        сказанного: на коротком куске Whisper угадывал японский.
         """
         mode = (getattr(cfg, "language", "") or "").strip().lower()
-        if mode != MIXED_LANGUAGE:
-            return False
-        return not (keep or "").strip()
+        if mode not in (MIXED_LANGUAGE, "auto"):
+            return False      # язык задан жёстко — переспрашивать нечего
+        if not (keep or "").strip():
+            return True       # пусто: пробуем по-русски
+        if foreign_script_ratio(keep) > 0:
+            return True       # иероглифы на русской речи — точно промах
+        detected = (getattr(info, "language", "") or "").strip().lower()
+        return detected not in ("ru", "en")
 
     def is_model_downloaded(self, model: str | None = None) -> bool:
         """Есть ли модель локально (чтобы предупредить о скачивании)."""
@@ -297,26 +308,38 @@ class WhisperTranscriber:
             probability = float(getattr(info, "language_probability", 0.0) or 0.0)
         except (TypeError, ValueError):  # pragma: no cover
             probability = 0.0
+        if detected not in ("ru", "en"):
+            # Японский/китайский «язык сеанса» — гарантированный мусор в тексте.
+            return
         if detected and duration >= 2.0 and probability >= 0.7:
             self._session_language = detected
             log.info("Язык сеанса: %s (%.2f)", detected, probability)
 
     def _run_model(self, model, audio, params: dict, cfg: Config, duration: float):
-        """Распознать кусок; в смешанном режиме — с повтором по-русски."""
+        """Распознать кусок; при промахе с языком — повторить по-русски."""
         pieces, info = model.transcribe(audio, **params)
         pieces = list(pieces)
         keep = " ".join((getattr(item, "text", "") or "") for item in pieces)
-        if duration < MIXED_MIN_SECONDS or not self._russian_retry_needed(cfg, keep):
+        if duration < MIXED_MIN_SECONDS or not self._russian_retry_needed(
+            cfg, keep, info
+        ):
             return pieces, info
+
+        detected = getattr(info, "language", "") or "?"
         log.info(
-            "Смешанный режим: пусто после автоопределения (язык=%s) — повторяю по-русски",
-            getattr(info, "language", "") or "?",
+            "Язык определён как %s — переспрашиваю по-русски (%r)",
+            detected,
+            keep[:60],
         )
         retry_params = dict(params)
         retry_params["language"] = MIXED_FALLBACK
         retry_pieces, retry_info = model.transcribe(audio, **retry_params)
         retry_pieces = list(retry_pieces)
-        if retry_pieces:
+        retry_text = " ".join((getattr(item, "text", "") or "") for item in retry_pieces)
+        if retry_text.strip() and (
+            foreign_script_ratio(retry_text) < foreign_script_ratio(keep)
+            or not keep.strip()
+        ):
             return retry_pieces, retry_info
         return pieces, info
 
