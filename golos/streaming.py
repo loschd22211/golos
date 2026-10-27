@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 
-from .audio import MicrophoneRecorder
+from .audio import MicrophoneRecorder, boost_quiet
 from .config import Config
 from .inject import InjectionError, TextInjector
 from .textproc import clean_text, looks_like_hallucination
@@ -195,12 +195,18 @@ class StreamingDictator:
             self.on_state(STATUS_LOADING, "Слушаю…")
             self._first_chunk = False
 
+        # После проверки на тишину подтягиваем тихую речь до нормального уровня:
+        # иначе модель на пике 0.02–0.05 почти ничего не слышит.
+        model_audio = tail
+        if getattr(cfg, "normalize_audio", True):
+            model_audio = boost_quiet(tail)
+
         hold_back = 0.15 if final else max(0.1, float(cfg.hold_back_seconds))
         force_commit = float(getattr(cfg, "force_commit_seconds", 2.5))
 
         try:
             segments = self.transcriber.segments(
-                tail,
+                model_audio,
                 cfg,
                 initial_prompt=self._context_prompt(),
                 beam_size=1 if not final else None,

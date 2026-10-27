@@ -43,7 +43,7 @@ def test_creates_project_files_check(monkeypatch, tmp_path, capsys, no_deps):
 def test_config_defaults_are_printed(monkeypatch, tmp_path, capsys, no_deps):
     run(monkeypatch, tmp_path)
     out = capsys.readouterr().out
-    assert "модель=small" in out
+    assert "модель=auto" in out
     assert "streaming=True" in out
 
 
@@ -59,7 +59,9 @@ def test_fix_writes_workable_settings(monkeypatch, tmp_path, capsys, no_deps):
     out = capsys.readouterr().out
 
     data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
-    assert data["model"] == "small"
+    # «auto» = medium на видеокарте, small на процессоре: тяжёлую модель не
+    # навязываем, но и не отбираем возможность быть точнее на GPU.
+    assert data["model"] == "auto"
     assert data["streaming"] is True
     assert data["beam_size"] == 3
     assert data["hold_back_seconds"] == 0.3
@@ -271,19 +273,19 @@ def test_fix_enables_streaming_and_lighter_model(monkeypatch, tmp_path, capsys):
 
     data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
     assert data["streaming"] is True
-    assert data["model"] == "small"
+    assert data["model"] == "auto"
 
 
 def test_fix_keeps_light_model(monkeypatch, tmp_path, capsys):
     appdata = tmp_path / "appdata" / "Golos"
     appdata.mkdir(parents=True)
-    (appdata / "config.json").write_text(json.dumps({"model": "small"}), encoding="utf-8")
+    (appdata / "config.json").write_text(json.dumps({"model": "base"}), encoding="utf-8")
 
     diagnose.fix_config(appdata, cuda_ok=False)
     capsys.readouterr()
 
     data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
-    assert data["model"] == "small"
+    assert data["model"] == "base", "лёгкий выбор пользователя не переписываем"
 
 
 # ------------------------------------- прогресс при загрузке и переиспользование

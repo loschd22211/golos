@@ -32,6 +32,30 @@ class Recording:
         return self.duration > 0 and self.peak > 0
 
 
+def boost_quiet(samples, target_peak: float = 0.55, max_gain: float = 12.0):
+    """Подтянуть тихую речь до нормальной громкости, не трогая громкую.
+
+    Whisper обучен на нормальном уровне записи: при пике 0.02–0.05 (тихий
+    микрофон, человек говорит вполголоса) он слышит «шум» и выдаёт пустой
+    текст или выдумки. Усиливаем такие куски до ``target_peak``, но не больше
+    чем в ``max_gain`` раз — иначе вместе с речью вылезет шум комнаты.
+    """
+    try:
+        import numpy as np
+    except Exception:  # pragma: no cover - numpy приходит с sounddevice
+        return samples
+    if samples is None or getattr(samples, "size", 0) == 0:
+        return samples
+    audio = np.asarray(samples, dtype=np.float32)
+    peak = float(np.max(np.abs(audio)))
+    if peak <= 1e-4 or peak >= target_peak:
+        return audio
+    gain = min(max_gain, target_peak / peak)
+    if gain <= 1.05:
+        return audio
+    return np.clip(audio * gain, -1.0, 1.0)
+
+
 def list_input_devices() -> list[str]:
     """Список входных устройств для окна настроек (индекс + название)."""
     try:
@@ -185,6 +209,11 @@ class MicrophoneRecorder:
         if self.config.trim_silence and audio.size:
             audio = _trim_silence(audio, int(self.config.sample_rate))
 
+        if getattr(self.config, "normalize_audio", True) and audio.size:
+            boosted = boost_quiet(audio)
+            if boosted is not audio:
+                log.info("Тихая запись: усилена в %.1f раза", _gain_of(audio, boosted))
+
         duration = float(audio.size) / float(self.config.sample_rate or 16000)
         log.info("Запись остановлена: %.2f c, пик %.3f", duration, peak)
         return Recording(audio, int(self.config.sample_rate), duration, peak)
@@ -270,6 +299,18 @@ class MicrophoneRecorder:
             return audio[:0]
         src_index = np.linspace(0.0, audio.size - 1, num=target_size, dtype=np.float64)
         return np.interp(src_index, np.arange(audio.size), audio).astype(np.float32)
+
+
+def _gain_of(before, after) -> float:
+    """Во сколько раз усилили звук (для журнала)."""
+    try:
+        import numpy as np
+
+        peak_before = float(np.max(np.abs(before)))
+        peak_after = float(np.max(np.abs(after)))
+        return peak_after / peak_before if peak_before > 0 else 1.0
+    except Exception:  # pragma: no cover
+        return 1.0
 
 
 def _trim_silence(audio, sample_rate: int, threshold: float = 0.006, margin: float = 0.15):

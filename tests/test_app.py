@@ -355,7 +355,7 @@ def test_status_dict(tmp_path):
     status = app.status()
     assert status["hotkey"] == "ctrl+alt+space"
     assert status["state"] == IDLE
-    assert status["model"] == "small"
+    assert status["model"] == "auto"
     assert status["config_file"].endswith("config.json")
 
 

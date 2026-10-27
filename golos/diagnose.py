@@ -438,6 +438,21 @@ def check_recording(config, seconds: float):
     return recording
 
 
+def _expected_model(config) -> str:
+    """Какая модель реально загрузится (для понятных сообщений).
+
+    «auto» — это medium на видеокарте и small на процессоре; человек должен
+    видеть конкретное имя и объём загрузки, а не слово auto.
+    """
+    try:
+        from golos.transcribe import resolve_device, resolve_model
+
+        return resolve_model(config.model, resolve_device(config.device))
+    except Exception:  # pragma: no cover - тесты с подменённым модулем
+        name = (getattr(config, "model", "") or "auto").lower()
+        return "small" if name == "auto" else name
+
+
 def check_model(config, appdata: Path, recording):
     """Загрузить модель и распознать запись. Возвращает транслятор для проверок."""
     section("Модель и распознавание")
@@ -445,21 +460,26 @@ def check_model(config, appdata: Path, recording):
         from golos.transcribe import WhisperTranscriber
 
         transcriber = WhisperTranscriber(config, appdata / "models")
+        expected_model = _expected_model(config)
+        if config.model == "auto":
+            print(f"     модель auto → для этого компьютера: {expected_model}")
         if transcriber.is_model_downloaded():
-            print(f"     загружаю модель {config.model} с диска…", flush=True)
+            print(f"     загружаю модель {expected_model} с диска…", flush=True)
         else:
+            size = "~1.5 ГБ" if expected_model == "medium" else "~470 МБ"
             say(
                 WARN,
-                f"модель {config.model} ещё не скачана",
-                "первый запуск скачает ~470 МБ: это минуты, нужен интернет",
+                f"модель {expected_model} ещё не скачана",
+                f"скачается один раз ({size}): это минуты, нужен интернет",
             )
-            print(f"     качаю модель {config.model}…", flush=True)
+            print(f"     качаю модель {expected_model}…", flush=True)
         started = time.time()
-        _run_with_progress(f"модель {config.model}", transcriber.preload)
+        _run_with_progress(f"модель {expected_model}", transcriber.preload)
         load_time = time.time() - started
         device = getattr(transcriber, "active_device", "") or "?"
         compute = getattr(transcriber, "active_compute", "") or "?"
-        say(OK, f"модель {config.model} загружена", f"{load_time:.1f} c")
+        loaded = getattr(transcriber, "active_model", "") or expected_model
+        say(OK, f"модель {loaded} загружена", f"{load_time:.1f} c")
         print(f"     реально работает на: {device}/{compute}")
         reason = getattr(transcriber, "fallback_reason", "")
         if reason:
@@ -611,7 +631,6 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
 
     data.update(
         {
-            "model": "small",
             "streaming": True,
             "stream_step": 0.35,
             "min_chunk_seconds": 0.8,
@@ -637,7 +656,12 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
         data["device"] = "cpu"
         data["compute_type"] = "int8"
         if data.get("model") in ("medium", "large", "large-v2", "large-v3"):
-            data["model"] = "small"
+            # Без видеокарты большая модель превратит каждую фразу в ожидание.
+            data["model"] = "auto"
+    # Модель не трогаем, если человек выбрал что-то разумное: «auto» ставим
+    # только когда в конфиге мусор или неподъёмная для этого компьютера модель.
+    if data.get("model") not in ("auto", "tiny", "base", "small", "medium", "large-v3"):
+        data["model"] = "auto"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -646,9 +670,9 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
               "потоковая вставка включена, beam 3")
         if cuda_ok:
             print("     устройство auto — видеокарта работает, будет быстро")
-            if data.get("model") == "small":
-                print("     на видеокарте можно взять точнее: в настройках "
-                      "модель medium (скачается ~1.5 ГБ)")
+            if data.get("model") == "auto":
+                print("     модель auto → на видеокарте возьмётся medium "
+                      "(скачается ~1.5 ГБ один раз, точность выше)")
         print("     перезапустите «Голос» (плашка → ✕, затем ярлык), "
               "чтобы настройки применились")
         if data.get("device") == "cpu":

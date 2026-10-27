@@ -8,21 +8,20 @@ def test_defaults_are_valid():
     cfg = Config()
     assert cfg.hotkey == "ctrl+alt+space"
     assert cfg.language == "ru"
-    assert cfg.model in ("tiny", "base", "small", "medium", "large-v3")
+    assert cfg.model in ("auto", "tiny", "base", "small", "medium", "large-v3")
     assert cfg.insert_method == "paste"
     assert cfg.streaming is True
-    assert cfg.model == "small"
+    assert cfg.model == "auto", "модель подбирается под компьютер"
 
 
 def test_normalize_fixes_bad_values():
     cfg = Config(model="huge", device="tpu", language="fr", insert_method="x",
                  beam_size=99, sample_rate=1, paste_delay=-5)
-    assert cfg.model == "small"
+    assert cfg.model == "auto"
     assert cfg.device == "auto"
     assert cfg.language == "ru"
     assert cfg.insert_method == "paste"
     assert cfg.streaming is True
-    assert cfg.model == "small"
     assert cfg.beam_size == 10
     assert cfg.sample_rate == 8000
     assert cfg.paste_delay == 0.0
@@ -51,7 +50,7 @@ def test_json_contains_cyrillic_not_escaped(tmp_path: Path):
 def test_missing_file_returns_defaults(tmp_path: Path):
     cfg, broken = load_config(tmp_path / "nope.json")
     assert broken is None
-    assert cfg.model == "small"
+    assert cfg.model == "auto"
 
 
 def test_broken_file_is_backed_up(tmp_path: Path):
@@ -156,22 +155,20 @@ def test_saved_config_remembers_new_version(tmp_path):
     assert data["language"] == "ru"
 
 
-def test_blur_is_switched_off_for_old_configs(tmp_path):
-    """1.4.0 включал акрил по умолчанию — из-за него был «серый квадрат»."""
+def test_old_opacity_is_bumped_for_readability(tmp_path):
+    """1.4.0 ставил 0.93; после переделки стекла читаемость лучше на 0.94."""
     path = tmp_path / "config.json"
-    path.write_text(
-        json.dumps({"overlay_glass": True, "overlay_opacity": 0.93, "config_version": 2}),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps({"overlay_opacity": 0.93, "config_version": 2}),
+                    encoding="utf-8")
     cfg, _ = load_config(path)
-    assert cfg.overlay_glass is False
     assert cfg.overlay_opacity == 0.94
 
 
-def test_new_config_keeps_explicit_blur(tmp_path):
+def test_old_blur_setting_is_ignored(tmp_path):
+    """Акрила больше нет: старый ключ просто не читается."""
     path = tmp_path / "config.json"
     path.write_text(
         json.dumps({"overlay_glass": True, "config_version": 3}), encoding="utf-8"
     )
     cfg, _ = load_config(path)
-    assert cfg.overlay_glass is True
+    assert not hasattr(cfg, "overlay_glass")
