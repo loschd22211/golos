@@ -471,6 +471,42 @@ def test_phrase_similarity():
     assert diagnose.phrase_similarity(diagnose.TEST_PHRASE, "もう ガ サ 助手") < 0.2
 
 
+def test_performance_warns_when_gpu_unused(monkeypatch, capsys):
+    """Видеокарта есть, а в настройках процессор — самая частая причина «медленно»."""
+    from golos.config import Config
+
+    diagnose.warnings.clear()
+    diagnose.failures.clear()
+    diagnose.check_performance(Config(model="base", device="cpu"), cuda_ok=True)
+    out = capsys.readouterr().out
+
+    assert "выбран процессор" in out
+    assert "base" in out          # слабая модель тоже названа
+    assert diagnose.warnings
+
+
+def test_performance_ok_on_gpu(capsys):
+    from golos.config import Config
+
+    diagnose.warnings.clear()
+    diagnose.check_performance(Config(model="small", device="cuda"), cuda_ok=True)
+    assert "считаем на видеокарте" in capsys.readouterr().out
+
+
+def test_fix_moves_weak_model_to_small(monkeypatch, tmp_path, capsys, no_deps):
+    appdata = tmp_path / "appdata" / "Golos"
+    appdata.mkdir(parents=True)
+    (appdata / "config.json").write_text(
+        json.dumps({"model": "base", "device": "cpu"}), encoding="utf-8"
+    )
+
+    diagnose.fix_config(appdata, cuda_ok=True)
+
+    data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
+    assert data["model"] == "small"
+    assert data["device"] == "auto"
+
+
 def test_noise_filters_check_reports_music_and_confidence(monkeypatch, capsys):
     """Диагностика должна подтверждать новые фильтры фантомов."""
     diagnose.failures.clear()

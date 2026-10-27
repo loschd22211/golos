@@ -270,6 +270,30 @@ def check_target_window() -> None:
         say(WARN, "проверка окна не удалась", str(exc))
 
 
+def check_performance(config, cuda_ok: bool) -> None:
+    """Видеокарта есть, а считаем на процессоре — самая частая причина «медленно»."""
+    section("Скорость")
+    device = (getattr(config, "device", "") or "auto").lower()
+    model = (getattr(config, "model", "") or "auto").lower()
+    if cuda_ok and device == "cpu":
+        say(
+            WARN,
+            "видеокарта работает, но в настройках выбран процессор",
+            "исправляется одной командой: .\\doctor.bat --fix",
+        )
+    elif cuda_ok:
+        say(OK, "считаем на видеокарте", f"device={device}")
+    else:
+        say(WARN, "считаем на процессоре", "это в разы медленнее, но работает")
+
+    if model in ("tiny", "base"):
+        say(
+            WARN,
+            f"модель {model} путает слова",
+            "для русского нужна small: плашка → настройки → Модель → small",
+        )
+
+
 def check_launch() -> None:
     """Ярлык и автозапуск: запуск без ручного run.bat каждый раз."""
     section("Запуск (ярлык и автозапуск)")
@@ -334,8 +358,8 @@ def check_config(appdata: Path) -> tuple:
     else:
         say(WARN, "config.json ещё не создан", "будут значения по умолчанию")
 
-    for key in ("model", "streaming", "stream_step", "hold_back_seconds",
-                "force_commit_seconds", "language"):
+    for key in ("model", "device", "compute_type", "streaming", "stream_step",
+                "hold_back_seconds", "force_commit_seconds", "language"):
         print(f"     {key}: {raw.get(key, '— (по умолчанию)')}")
 
     if raw.get("model") in ("medium", "large-v3") and "streaming" not in raw:
@@ -363,6 +387,9 @@ def check_config(appdata: Path) -> tuple:
         if config.model in ("medium", "large-v3"):
             say(WARN, f"модель {config.model} тяжёлая",
                 "на процессоре первый текст появится через минуты — поставьте small")
+        if config.model in ("tiny", "base") and config.device != "cuda":
+            say(WARN, f"модель {config.model} слабая для русского",
+                "на процессоре она ещё и медленная — поставьте small")
         return config, raw
     except Exception:
         traceback.print_exc()
@@ -497,6 +524,13 @@ def check_recording(config, seconds: float):
             f"{recording.duration:.1f} c из {seconds:g} c — закройте «Голос» "
             "и другие программы с микрофоном, повторите")
         return None
+    if recording.peak > 0.95:
+        say(
+            WARN,
+            "микрофон перегружен (пик почти 1.0)",
+            "убавьте уровень входа в Windows: Звук → Устройство записи → "
+            "Свойства → Уровни; перегрузка превращает речь в шум",
+        )
     if recording.peak < 0.01:
         say(BAD, "микрофон молчит (тишина)",
             "говорить нужно сразу после этой строки; если не помогло — "
@@ -573,7 +607,13 @@ def check_model(config, appdata: Path, recording):
                     "по нему видно, где теряется речь",
                 )
         else:
-            say(WARN, "текст не распознан", f"образец: «{TEST_PHRASE}»")
+            say(
+                WARN,
+                "текст не распознан",
+                "модель не слышит речь: тихий микрофон, сильный шум или "
+                "слабая модель (base). Поставьте small: .\\doctor.bat --fix",
+            )
+            print(f"     образец для чтения: «{TEST_PHRASE}»")
         if result.text.strip():
             ratio = elapsed / max(0.1, recording.duration)
             say(OK, "речь распознаётся", f"{ratio:.2f}× от длительности")
@@ -763,6 +803,10 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
     # только когда в конфиге мусор или неподъёмная для этого компьютера модель.
     if data.get("model") not in ("auto", "tiny", "base", "small", "medium", "large-v3"):
         data["model"] = "auto"
+    if cuda_ok and data.get("model") in ("tiny", "base"):
+        # На видеокарте small считается быстрее реального времени, а разницу
+        # в точности на русском слышно сразу: base путает слова.
+        data["model"] = "small"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -807,6 +851,7 @@ def main(argv: list[str] | None = None) -> int:
     check_launch()
     check_packages()
     cuda_ok = check_gpu(config)
+    check_performance(config, cuda_ok)
     if args.fix:
         fix_config(appdata, cuda_ok=cuda_ok)
         config, raw = check_config(appdata)
