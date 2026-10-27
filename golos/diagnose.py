@@ -584,6 +584,27 @@ def check_noise_filters() -> None:
             say(OK, "тишина не уходит в модель", f"порог {cfg.silence_threshold}")
         else:
             say(WARN, "фильтр тишины выключен", "будет медленнее и больше выдумок")
+
+        # Музыка и гул: на них модель «подписывает» звук словами.
+        if getattr(cfg, "skip_non_speech", True):
+            import numpy as _np
+
+            from golos.streaming import _speech_stats
+
+            tone = (_np.sin(_np.linspace(0, 800, 16000)) * 0.2).astype(_np.float32)
+            if _speech_stats(tone)["steady"]:
+                say(OK, "музыка и гул не уходят в модель", "ровный звук отсекается")
+            else:
+                say(WARN, "проверка «это речь?» не сработала", "музыка может попасть в текст")
+        else:
+            say(WARN, "фильтр музыки выключен", "будут фантомные «спокойная музыка»")
+
+        confidence = float(getattr(cfg, "word_confidence", 0.0) or 0.0)
+        if confidence > 0:
+            say(OK, "неуверенные слова отбрасываются", f"порог {confidence}")
+        else:
+            say(WARN, "фильтр уверенности выключен",
+                "в текст будут попадать «додуманные» слова")
     except Exception as exc:  # pragma: no cover
         say(WARN, "проверка фильтров не удалась", str(exc))
 

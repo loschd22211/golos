@@ -456,3 +456,16 @@ def test_verdict_is_printed_by_python(monkeypatch, tmp_path, capsys, no_deps):
     run(monkeypatch, tmp_path)
     out = capsys.readouterr().out
     assert "Итог:" in out
+
+
+def test_noise_filters_check_reports_music_and_confidence(monkeypatch, capsys):
+    """Диагностика должна подтверждать новые фильтры фантомов."""
+    diagnose.failures.clear()
+    diagnose.warnings.clear()
+
+    diagnose.check_noise_filters()
+    out = capsys.readouterr().out
+
+    assert "музыка и гул не уходят в модель" in out
+    assert "неуверенные слова отбрасываются" in out
+    assert not diagnose.failures

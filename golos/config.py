@@ -111,6 +111,12 @@ class Config:
     # Подтягивать тихую речь до нормальной громкости перед распознаванием:
     # с тихим микрофоном (пик 0.02-0.05) модель почти ничего не слышит.
     normalize_audio: bool = True
+    # Не отправлять в модель музыку, гул и ровный шум: на них Whisper
+    # «подписывает» звук словами («Спокойная музыка», «Поп»), которых не было.
+    skip_non_speech: bool = True
+    # Минимальная уверенность модели в слове. Ниже порога слово не вставляется:
+    # именно так в текст попадали «Если что», «Ну это было» на фоне музыки.
+    word_confidence: float = 0.35
 
     # --- распознавание ---
     # "auto": на видеокарте — medium (точнее), на процессоре — small (быстрее).
@@ -191,6 +197,8 @@ class Config:
         self.force_commit_seconds = _clamp_float(self.force_commit_seconds, 1.0, 15.0, 2.5)
         self.silence_threshold = _clamp_float(self.silence_threshold, 0.0, 0.2, 0.004)
         self.normalize_audio = _as_bool(self.normalize_audio, True)
+        self.skip_non_speech = _as_bool(self.skip_non_speech, True)
+        self.word_confidence = _clamp_float(self.word_confidence, 0.0, 0.95, 0.35)
         self.sample_rate = _clamp_int(self.sample_rate, 8000, 48000, 16000)
         self.min_duration = _clamp_float(self.min_duration, 0.1, 10.0, 0.35)
         self.paste_delay = _clamp_float(self.paste_delay, 0.0, 2.0, 0.15)

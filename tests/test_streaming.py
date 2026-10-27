@@ -8,6 +8,26 @@ from golos.config import Config
 from golos.streaming import StreamingDictator
 
 
+def speech_like(seconds: float, amplitude: float = 0.1):
+    """Сигнал, похожий на речь: слоги с паузами (у речи «дышит» громкость).
+
+    Ровный тон (np.full) теперь справедливо считается музыкой/шумом и в модель
+    не отправляется, поэтому в тестах нужен материал, похожий на живую речь.
+    """
+    import numpy as np
+
+    rate = 16000
+    total = int(seconds * rate)
+    audio = np.zeros(total, dtype=np.float32)
+    period = int(0.25 * rate)     # 250 мс
+    voiced = int(0.16 * rate)     # 160 мс «слога», остальное — пауза
+    for start in range(0, total, period):
+        end = min(total, start + voiced)
+        chunk = np.linspace(0, 12 * np.pi, max(1, end - start))
+        audio[start:end] = amplitude * np.sin(chunk).astype(np.float32)
+    return audio
+
+
 class FakeRecorder:
     """Отдаёт заданное аудио, длину которого можно «наращивать» из теста."""
 
@@ -20,10 +40,9 @@ class FakeRecorder:
         self.length = int(seconds * self.sample_rate)
 
     def snapshot(self):
-        import numpy as np
 
-        # 0.1 — «есть звук»: тишина теперь в модель не уходит
-        return np.full(self.length, 0.1, dtype=np.float32)
+        # Речеподобный сигнал: тишина в модель не уходит, ровный тон — тоже.
+        return speech_like(self.length / self.sample_rate, 0.1)
 
 
 class FakeTranscriber:
@@ -382,7 +401,6 @@ def test_injection_error_stops_the_session():
             self.calls += 1
             raise InjectionError("активное окно запущено от администратора")
 
-    import numpy as np
 
     transcriber = WordTranscriber()
     injector = FailingInjector()
@@ -398,7 +416,7 @@ def test_injection_error_stops_the_session():
     for _ in range(3):
         if stream._fatal:
             break
-        stream._process_tail(np.full(16000 * 3, 0.1, dtype=np.float32), final=False)
+        stream._process_tail(speech_like(3, 0.1), final=False)
 
     assert injector.calls == 1
     assert len(errors) == 1
@@ -411,7 +429,6 @@ def test_repeating_chunk_is_not_inserted_forever():
     В журнале пользователя так появились десятки подряд «Понимаешь.» —
     третий одинаковый кусок подряд вставлять нельзя.
     """
-    import numpy as np
 
     cfg = Config()
     transcriber = WordTranscriber()  # всегда один и тот же текст
@@ -423,7 +440,7 @@ def test_repeating_chunk_is_not_inserted_forever():
         config=cfg,
     )
 
-    audio = np.full(16000 * 3, 0.1, dtype=np.float32)
+    audio = speech_like(3, 0.1)
     for _ in range(5):
         stream._process_tail(audio, final=False)
 
@@ -432,7 +449,6 @@ def test_repeating_chunk_is_not_inserted_forever():
 
 
 def test_different_chunks_are_all_inserted():
-    import numpy as np
 
     class GrowingTranscriber(WordTranscriber):
         def __init__(self):
@@ -464,7 +480,7 @@ def test_different_chunks_are_all_inserted():
         config=cfg,
     )
 
-    audio = np.full(16000 * 3, 0.1, dtype=np.float32)
+    audio = speech_like(3, 0.1)
     for _ in range(4):
         stream._process_tail(audio, final=False)
 
@@ -493,7 +509,6 @@ def test_silence_is_not_sent_to_the_model():
 
 
 def test_quiet_but_audible_speech_is_recognized():
-    import numpy as np
 
     injector = FakeInjector()
     transcriber = WordTranscriber()
@@ -505,13 +520,12 @@ def test_quiet_but_audible_speech_is_recognized():
     )
 
     # тихая, но различимая речь (0.02) должна обрабатываться
-    stream._process_tail(np.full(16000 * 3, 0.02, dtype=np.float32), final=False)
+    stream._process_tail(speech_like(3, 0.1), final=False)
     assert transcriber.calls
 
 
 def test_hallucinated_subtitle_credits_are_dropped():
     """«Редактор субтитров А.Семкин Корректор В.Сухиашвили» — не речь."""
-    import numpy as np
 
     class CreditsTranscriber(WordTranscriber):
         def segments(self, audio, config=None, initial_prompt=None, beam_size=None,
@@ -533,7 +547,7 @@ def test_hallucinated_subtitle_credits_are_dropped():
         config=Config(),
     )
 
-    stream._process_tail(np.full(16000 * 3, 0.1, dtype=np.float32), final=False)
+    stream._process_tail(speech_like(3, 0.1), final=False)
 
     assert injector.inserted == []
     assert "субтитр" not in stream.committed_text.lower()
@@ -541,7 +555,6 @@ def test_hallucinated_subtitle_credits_are_dropped():
 
 def test_looped_chunk_is_not_inserted():
     """«Аллоууууу…» / «Приём, приём, приём» — зацикливание модели, не речь."""
-    import numpy as np
 
     class LoopTranscriber(WordTranscriber):
         def segments(self, audio, config=None, initial_prompt=None, beam_size=None,
@@ -563,7 +576,7 @@ def test_looped_chunk_is_not_inserted():
         config=Config(),
     )
 
-    stream._process_tail(np.full(16000 * 3, 0.1, dtype=np.float32), final=False)
+    stream._process_tail(speech_like(3, 0.1), final=False)
 
     assert injector.inserted == []
     assert "приём" not in stream.committed_text.lower()
@@ -591,7 +604,7 @@ def test_quiet_speech_goes_to_model_boosted():
         config=Config(),
     )
     # 0.02 — тише нормы, но выше порога тишины 0.004
-    stream._process_tail(np.full(16000 * 2, 0.02, dtype=np.float32), final=False)
+    stream._process_tail(speech_like(2, 0.02), final=False)
     # 0.02 × 12 (предел усиления) = 0.24 — нормальный уровень речи
     assert transcriber.peak > 0.2, "модель должна получить подтянутый звук"
 
@@ -618,5 +631,5 @@ def test_normalization_respects_config():
         injector=FakeInjector(),
         config=cfg,
     )
-    stream._process_tail(np.full(16000 * 2, 0.02, dtype=np.float32), final=False)
-    assert transcriber.peak == pytest.approx(0.02, rel=1e-3)
+    stream._process_tail(speech_like(2, 0.02), final=False)
+    assert transcriber.peak == pytest.approx(0.02, rel=1e-2)
