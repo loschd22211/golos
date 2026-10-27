@@ -352,11 +352,14 @@ def check_config(appdata: Path) -> tuple:
             say(BAD, "потоковая вставка выключена",
                 "текст появится только после остановки записи — doctor.bat --fix включит её")
         if config.language == "ru":
-            say(WARN, "язык жёстко русский",
-                "английские слова будут записаны кириллицей — для смешанной "
-                "речи поставьте «Русский + английский»")
-        elif config.language == "ru+en":
-            say(OK, "смешанная речь", "русский + английский в одной фразе")
+            say(OK, "русский язык", "английские слова пишутся латиницей")
+        elif config.language in ("ru+en", "auto"):
+            say(
+                WARN,
+                f"язык «{config.language}»: определяется по кускам",
+                "на коротких кусках возможны иероглифы и чужие слова — "
+                "надёжнее «Русский»",
+            )
         if config.model in ("medium", "large-v3"):
             say(WARN, f"модель {config.model} тяжёлая",
                 "на процессоре первый текст появится через минуты — поставьте small")
@@ -395,6 +398,30 @@ def check_devices() -> None:
     say(OK, "микрофоны найдены", f"{len(inputs)} устройств(а)")
 
 
+# Образец для проверки распознавания: человек читает его в микрофон, а мы
+# сравниваем результат. В нём есть и русские слова, и английские термины —
+# ровно то, что должно распознаваться в обычной диктовке.
+TEST_PHRASE = "Проверка связи, один, два, три. Сделай commit и push в GitHub."
+
+
+def _compare_words(text: str) -> list[str]:
+    return [
+        word.strip(" .,!?…-—:;\"'()[]{}«»").lower().replace("ё", "е")
+        for word in (text or "").split()
+        if word.strip(" .,!?…-—:;\"'()[]{}«»")
+    ]
+
+
+def phrase_similarity(reference: str, text: str) -> float:
+    """Насколько распознанный текст похож на прочитанный образец (0…1)."""
+    import difflib
+
+    left, right = _compare_words(reference), _compare_words(text)
+    if not left or not right:
+        return 0.0
+    return difflib.SequenceMatcher(None, left, right).ratio()
+
+
 def check_hotkeys(config) -> None:
     section("Горячие клавиши")
     try:
@@ -428,6 +455,9 @@ def check_clipboard() -> None:
 
 def check_recording(config, seconds: float):
     section(f"Запись {seconds:g} секунд — ГОВОРИТЕ СЕЙЧАС")
+    print("     Прочитайте вслух (чтобы проверить распознавание по образцу):")
+    print(f"       «{TEST_PHRASE}»")
+    print("     Начинайте сразу после многоточия ниже.")
     try:
         from golos.audio import MicrophoneRecorder
     except Exception:
@@ -532,6 +562,18 @@ def check_model(config, appdata: Path, recording):
         elapsed = time.time() - started
         print(f"     распознавание: {elapsed:.1f} c, язык: {result.language or '—'}")
         print(f"     текст: {result.text!r}")
+        similarity = phrase_similarity(TEST_PHRASE, result.text)
+        if result.text.strip():
+            print(f"     похожесть с образцом: {similarity * 100:.0f}%")
+            if similarity < 0.5:
+                say(
+                    WARN,
+                    "текст мало похож на прочитанный образец",
+                    "проверьте микрофон и модель small; пришлите этот вывод — "
+                    "по нему видно, где теряется речь",
+                )
+        else:
+            say(WARN, "текст не распознан", f"образец: «{TEST_PHRASE}»")
         if result.text.strip():
             ratio = elapsed / max(0.1, recording.duration)
             say(OK, "речь распознаётся", f"{ratio:.2f}× от длительности")
@@ -702,7 +744,7 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
     # английские термины в одной фразе. Осознанный выбор одного языка
     # («ru» / «en») не трогаем.
     if data.get("language") not in ("ru", "en"):
-        data["language"] = "ru+en"
+        data["language"] = "ru"
     if data.get("streaming") is not True:
         data["streaming"] = True
     if cuda_ok:

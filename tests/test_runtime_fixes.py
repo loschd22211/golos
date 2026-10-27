@@ -264,25 +264,29 @@ def test_new_recording_waits_for_final_chunk(tmp_path):
 
 
 # ---------------------------------------------------------------------- языки
-def test_mixed_language_is_default_and_listed():
-    assert Config().language == "ru+en"
-    assert "ru+en" in LANGUAGES
-
-
-def test_mixed_language_does_not_lock_one_language():
+def test_russian_is_default_and_english_terms_work():
+    """По умолчанию — жёсткий русский: английские термины пишутся латиницей."""
     cfg = Config()
+    assert cfg.language == "ru"
+    assert "ru" in LANGUAGES
+
     transcriber = WhisperTranscriber(cfg)
-    assert transcriber._resolve_language(cfg) is None
+    assert transcriber._resolve_language(cfg) == "ru"
 
     cfg.language = "en"
     assert transcriber._resolve_language(cfg) == "en"
 
 
-def test_legacy_russian_config_becomes_mixed(tmp_path):
+def test_mixed_mode_leaves_language_to_model():
+    cfg = Config(language="ru+en")
+    assert WhisperTranscriber(cfg)._resolve_language(cfg) is None
+
+
+def test_legacy_mixed_config_becomes_russian(tmp_path):
     path = tmp_path / "config.json"
-    path.write_text('{"language": "ru", "config_version": 4}', encoding="utf-8")
+    path.write_text('{"language": "ru+en", "config_version": 6}', encoding="utf-8")
     cfg, _ = load_config(path)
-    assert cfg.language == "ru+en"
+    assert cfg.language == "ru"
 
 
 class FakeWord:
@@ -320,7 +324,7 @@ class FakeModel:
 
 
 def test_mixed_mode_retries_in_russian_when_empty():
-    cfg = Config()
+    cfg = Config(language="ru+en")
     transcriber = WhisperTranscriber(cfg)
     model = FakeModel()
     params = {"language": None}
@@ -335,7 +339,7 @@ def test_mixed_mode_retries_in_russian_when_empty():
 
 
 def test_no_russian_retry_when_text_found():
-    cfg = Config()
+    cfg = Config(language="ru+en")
     transcriber = WhisperTranscriber(cfg)
 
     class Model(FakeModel):
@@ -353,13 +357,61 @@ def test_no_russian_retry_when_text_found():
 
 
 def test_short_audio_is_not_retried():
-    cfg = Config()
+    cfg = Config(language="ru+en")
     transcriber = WhisperTranscriber(cfg)
     model = FakeModel()
     transcriber._run_model(
         model, np.zeros(4000, dtype=np.float32), {"language": None}, cfg, 0.2
     )
     assert model.languages == [None]
+
+
+class CjkModel:
+    """Модель, которая «слышит» японский вместо русской речи."""
+
+    def __init__(self):
+        self.languages = []
+
+    def transcribe(self, audio, **params):
+        language = params.get("language")
+        self.languages.append(language)
+        if language is None:
+            return iter([FakeSegment("もう ガ サ 助手")]), FakeInfo("ja", 0.9)
+        return iter([FakeSegment("этот помощник")]), FakeInfo("ru", 0.9)
+
+
+def test_japanese_detection_is_reasked_in_russian():
+    """«もう、ガ サ» из журнала: иероглифы вместо русской речи — брак."""
+    cfg = Config(language="ru+en")
+    transcriber = WhisperTranscriber(cfg)
+    model = CjkModel()
+
+    pieces, info = transcriber._run_model(
+        model, np.zeros(16000, dtype=np.float32), {"language": None}, cfg, 1.0
+    )
+
+    assert model.languages == [None, "ru"]
+    assert pieces[0].text == "этот помощник"
+    assert info.language == "ru"
+
+
+def test_foreign_script_is_stripped_from_text():
+    text = textproc.clean_text("Китайские 汉字 иероглифы", Config())
+    assert textproc.has_foreign_script(text) is False
+    assert "Китайские" in text and "иероглифы" in text
+
+
+def test_chunk_of_hieroglyphs_is_a_hallucination():
+    assert textproc.looks_like_hallucination("もう ガ サ 漢字") is True
+
+
+def test_session_language_never_locks_to_japanese():
+    cfg = Config(language="auto")
+    transcriber = WhisperTranscriber(cfg)
+    transcriber._lock_session_language(cfg, FakeInfo("ja", 0.99), 5.0)
+    assert transcriber._session_language == ""
+    transcriber._lock_session_language(cfg, FakeInfo("ru", 0.99), 5.0)
+    assert transcriber._session_language == "ru"
 
 
 # ----------------------------------------------------------------------- CUDA

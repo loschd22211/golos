@@ -48,6 +48,15 @@ def _is_allowed_mark(ch: str) -> bool:
     code = ord(ch)
     return any(start <= code <= end for start, end in _MARK_RANGES)
 
+# Иероглифы, кана и хангыль. Для русской диктовки это всегда ошибка: Whisper
+# на коротком куске может «услышать» японский или китайский и выдать «もう、ガサ»
+# вместо сказанного. Такие символы в текст не попадают.
+_FOREIGN_SCRIPT = re.compile(
+    r"[\u2e80-\u2fdf\u3040-\u30ff\u3190-\u31ff\u3400-\u4dbf"
+    r"\u4e00-\u9fff\ua960-\ua97f\uac00-\ud7af\uf900-\ufaff"
+    r"\uff00-\uffef\u3000-\u303f]"
+)
+
 _SPACES = re.compile(r"[ \t\u00a0\u2000-\u200a]+")
 _NEWLINES = re.compile(r"\s*\n+\s*")
 _SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:!?…%\)\]\}])")
@@ -87,6 +96,9 @@ def clean_text(text: str, config: Config | None = None, **overrides) -> str:
     result = _NON_SPEECH.sub(" ", result)
     result = _EMOJI.sub(" ", result)
     result = strip_junk_chars(result)
+    # Иероглифы и кана — не наша речь: Whisper так «слышит» русский на коротких
+    # кусках. Убираем до остальной чистки, чтобы не прилипали к словам.
+    result = strip_foreign_script(result)
     result = _NEWLINES.sub(" ", result)
     result = _SPACES.sub(" ", result).strip()
 
@@ -198,6 +210,26 @@ def strip_junk_chars(text: str) -> str:
     return "".join(out)
 
 
+def has_foreign_script(text: str) -> bool:
+    """Есть ли в тексте иероглифы/кана/хангыль (для русской речи — брак)."""
+    return bool(text) and bool(_FOREIGN_SCRIPT.search(text))
+
+
+def strip_foreign_script(text: str) -> str:
+    """Убрать иероглифы и «полноширинные» знаки, оставив остальной текст."""
+    if not text:
+        return ""
+    return _FOREIGN_SCRIPT.sub("", text)
+
+
+def foreign_script_ratio(text: str) -> float:
+    """Доля иероглифов среди букв: 1.0 — сплошной «китайский» кусок."""
+    letters = [ch for ch in (text or "") if ch.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for ch in letters if _FOREIGN_SCRIPT.match(ch)) / len(letters)
+
+
 def collapse_repeats(text: str) -> str:
     """Схлопнуть зацикливания: «Аллоуууу» → «Аллоууу», «да, да, да» → «да»."""
     if not text:
@@ -289,6 +321,10 @@ def _squash(text: str) -> str:
 def looks_like_hallucination(text: str) -> bool:
     """Похоже ли на «выдумку» модели, а не на речь пользователя."""
     if looks_like_loop(text or ""):
+        return True
+    # Иероглифы вместо русской речи — модель ошиблась языком, а не записала
+    # сказанное. Половина букв «нерусскими» быть не может.
+    if foreign_script_ratio(text) >= 0.5:
         return True
     plain = _squash(text).strip(" .,!?…-—:;\"'()[]{}")
     if not plain:

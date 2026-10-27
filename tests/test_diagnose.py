@@ -439,8 +439,8 @@ def test_fix_enables_gpu_when_cuda_works(tmp_path, capsys):
     assert data["compute_type"] == "auto"
 
 
-def test_fix_pins_mixed_language(monkeypatch, tmp_path, capsys, no_deps):
-    """--fix ставит смешанную речь: русский + английский в одной фразе."""
+def test_fix_pins_russian_language(monkeypatch, tmp_path, capsys, no_deps):
+    """--fix ставит русский: автоопределение по кускам давало иероглифы."""
     appdata = tmp_path / "appdata" / "Golos"
     appdata.mkdir(parents=True)
     (appdata / "config.json").write_text(json.dumps({"language": "auto"}), encoding="utf-8")
@@ -449,7 +449,7 @@ def test_fix_pins_mixed_language(monkeypatch, tmp_path, capsys, no_deps):
     capsys.readouterr()
 
     data = json.loads((appdata / "config.json").read_text(encoding="utf-8"))
-    assert data["language"] == "ru+en"
+    assert data["language"] == "ru"
 
 
 def test_verdict_is_printed_by_python(monkeypatch, tmp_path, capsys, no_deps):
@@ -457,6 +457,18 @@ def test_verdict_is_printed_by_python(monkeypatch, tmp_path, capsys, no_deps):
     run(monkeypatch, tmp_path)
     out = capsys.readouterr().out
     assert "Итог:" in out
+
+
+def test_test_phrase_checks_mixed_speech():
+    """Образец для чтения содержит и русские слова, и английские термины."""
+    assert "Проверка" in diagnose.TEST_PHRASE
+    assert "commit" in diagnose.TEST_PHRASE
+
+
+def test_phrase_similarity():
+    assert diagnose.phrase_similarity(diagnose.TEST_PHRASE, diagnose.TEST_PHRASE) == 1.0
+    assert diagnose.phrase_similarity(diagnose.TEST_PHRASE, "") == 0.0
+    assert diagnose.phrase_similarity(diagnose.TEST_PHRASE, "もう ガ サ 助手") < 0.2
 
 
 def test_noise_filters_check_reports_music_and_confidence(monkeypatch, capsys):

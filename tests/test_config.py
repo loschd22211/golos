@@ -7,7 +7,7 @@ from golos.config import AppPaths, Config, load_config, save_config
 def test_defaults_are_valid():
     cfg = Config()
     assert cfg.hotkey == "ctrl+alt+space"
-    assert cfg.language == "ru+en"
+    assert cfg.language == "ru"
     assert cfg.model in ("auto", "tiny", "base", "small", "medium", "large-v3")
     assert cfg.insert_method == "paste"
     assert cfg.streaming is True
@@ -19,7 +19,7 @@ def test_normalize_fixes_bad_values():
                  beam_size=99, sample_rate=1, paste_delay=-5)
     assert cfg.model == "auto"
     assert cfg.device == "auto"
-    assert cfg.language == "ru+en"
+    assert cfg.language == "ru"
     assert cfg.insert_method == "paste"
     assert cfg.streaming is True
     assert cfg.beam_size == 10
@@ -131,23 +131,33 @@ def test_custom_prompt_is_kept(tmp_path):
     assert config.initial_prompt == "GitHub, Docker"
 
 
-def test_legacy_auto_language_becomes_mixed(tmp_path):
-    """Старые конфиги писали "auto" — переводим на смешанную речь ru+en."""
+def test_legacy_auto_language_becomes_russian(tmp_path):
+    """Старые конфиги писали "auto" — переводим на жёсткий русский."""
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"language": "auto"}), encoding="utf-8")
     cfg, broken = load_config(path)
     assert broken is None
-    assert cfg.language == "ru+en"
+    assert cfg.language == "ru"
 
 
 def test_explicit_auto_language_is_kept(tmp_path):
     """Свежий конфиг: осознанный «Авто» в настройках остаётся как есть."""
     path = tmp_path / "config.json"
     path.write_text(
-        json.dumps({"language": "auto", "config_version": 5}), encoding="utf-8"
+        json.dumps({"language": "auto", "config_version": 7}), encoding="utf-8"
     )
     cfg, _ = load_config(path)
     assert cfg.language == "auto"
+
+
+def test_mixed_language_from_160_becomes_russian(tmp_path):
+    """1.6.0 ставила «смешанную речь» — из-за неё в тексте были иероглифы."""
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"language": "ru+en", "config_version": 6}), encoding="utf-8"
+    )
+    cfg, _ = load_config(path)
+    assert cfg.language == "ru"
 
 
 def test_explicit_english_is_kept(tmp_path):
@@ -163,7 +173,7 @@ def test_saved_config_remembers_new_version(tmp_path):
     save_config(Config(), path)
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["config_version"] >= 2
-    assert data["language"] == "ru+en"
+    assert data["language"] == "ru"
 
 
 def test_old_opacity_is_bumped_for_readability(tmp_path):

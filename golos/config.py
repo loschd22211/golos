@@ -22,15 +22,16 @@ MODEL_LABELS = {
     "large-v3": "large-v3 — максимум точности, нужен мощный ПК/GPU",
 }
 
-# «ru+en» — то, что нужно на практике: русская речь с английскими терминами
-# («сделай commit и push»). Модель многоязычная и определяет язык каждого куска
-# сама, а если уверенности нет — кусок переспрашивается по-русски, чтобы текст
-# всё равно был, а не пропадал.
+# Русский — рабочий режим. Английские термины («commit», «push», «Python»)
+# при language="ru" всё равно распознаются латиницей: они в словаре модели.
+# Автоопределение (и «ru+en») на кусках по 0.35–1 с ошибается и выдаёт
+# иероглифы вместо русской речи — это осталось вариантом для экспериментов,
+# но не значением по умолчанию.
 LANGUAGES = {
-    "ru+en": "Русский + английский (смешанная речь)",
-    "ru": "Только русский",
-    "auto": "Авто — определять по речи",
+    "ru": "Русский (английские слова — латиницей)",
     "en": "Только английский",
+    "ru+en": "Смешанная речь (язык по каждому куску)",
+    "auto": "Авто — определять по речи",
 }
 
 INSERT_METHODS = {
@@ -38,7 +39,7 @@ INSERT_METHODS = {
     "type": "Печать посимвольно (буква за буквой)",
 }
 
-CONFIG_VERSION = 6
+CONFIG_VERSION = 7
 
 DEVICES = ("auto", "cpu", "cuda")
 COMPUTE_TYPES = ("auto", "int8", "int8_float16", "float16", "float32")
@@ -129,10 +130,11 @@ class Config:
     model: str = "auto"
     device: str = "auto"
     compute_type: str = "auto"
-    # Смешанная речь по умолчанию: русский + английский в одной фразе. Язык
-    # определяется по каждому куску отдельно, а неуверенный кусок
-    # переспрашивается по-русски — «как слышит», но текст не теряется.
-    language: str = "ru+en"
+    # Русский по умолчанию. На коротких кусках автоопределение языка
+    # ошибается («Fiking» вместо русской фразы, иероглифы вместо слов),
+    # поэтому язык задаётся жёстко, а английские термины модель и так пишет
+    # латиницей.
+    language: str = "ru"
     beam_size: int = 3
     vad_filter: bool = True
     condition_on_previous_text: bool = False
@@ -188,7 +190,7 @@ class Config:
         self.model = _pick(self.model, MODELS, "auto")
         self.device = _pick(self.device, DEVICES, "auto")
         self.compute_type = _pick(self.compute_type, COMPUTE_TYPES, "auto")
-        self.language = _pick(self.language, tuple(LANGUAGES), "ru+en")
+        self.language = _pick(self.language, tuple(LANGUAGES), "ru")
         self.insert_method = _pick(self.insert_method, tuple(INSERT_METHODS), "paste")
 
         self.hotkey = str(self.hotkey or "").strip() or "ctrl+alt+space"
@@ -258,11 +260,12 @@ def load_config(path: Path | None = None) -> tuple[Config, Path | None]:
             # запускали руками. Включаем один раз; галочку в настройках
             # («Запускать с Windows») можно снять в любой момент.
             config.autostart = True
-        if saved_version < 5 and raw.get("language") in ("ru", "auto"):
-            # 1.5.2: один язык больше не навязывается — русский с английскими
-            # терминами идёт как смешанная речь. Осознанный «Только английский»
-            # не трогаем, а «Только русский» / «Авто» переводим один раз.
-            config.language = "ru+en"
+        if saved_version < 7 and raw.get("language") in ("ru+en", "auto"):
+            # 1.6.1: язык определяется жёстко. Автоопределение по кускам
+            # выдавало иероглифы и «Thank you» вместо русской речи, поэтому
+            # «смешанный» и «авто» переводятся на русский с английскими
+            # терминами. Осознанный «Только английский» не трогаем.
+            config.language = "ru"
         if "streaming" not in raw:
             # Конфиг от версии без потокового режима: там по умолчанию стояла
             # тяжёлая модель medium, из-за неё запуск занимал десятки секунд.
