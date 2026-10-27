@@ -269,6 +269,20 @@ def is_our_window(hwnd: int | None) -> bool:
     return int(pid) == os.getpid()
 
 
+def looks_like_overlay(hwnd: int | None) -> bool:
+    """Окно похоже на плашку «Голос» (в том числе другого экземпляра).
+
+    Печатать в плашку бессмысленно: это не поле ввода, текст там пропадёт.
+    """
+    if not hwnd:  # pragma: no cover - защита от None
+        return False
+    title = (window_title(hwnd) or "").strip().lower()
+    if "голос" in title or "golos" in title:
+        return True
+    exe = (process_exe(window_pid(hwnd)) or "").lower()
+    return exe.endswith(("pythonw.exe", "python.exe")) and not title
+
+
 def force_foreground(hwnd: int | None) -> bool:
     """Сделать окно активным, даже если фокус сейчас у нас в оверлее.
 
@@ -420,8 +434,11 @@ class TargetTracker:
         в собственную плашку.
         """
         for candidate in (self._pinned, self._hwnd):
-            if candidate and is_window(candidate) and not is_our_window(candidate):
-                return int(candidate)
+            if not candidate or not is_window(candidate):
+                continue
+            if is_our_window(candidate) or looks_like_overlay(candidate):
+                continue
+            return int(candidate)
         return 0
 
     @property

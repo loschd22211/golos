@@ -4,6 +4,6 @@
 где сейчас стоит курсор.
 """
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 APP_NAME = "Golos"
 APP_TITLE = "Голос"

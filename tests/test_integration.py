@@ -105,9 +105,17 @@ def pipeline(monkeypatch, tmp_path):
     # 1 секунда «речи» при 16 кГц, один блок
     sd = types.ModuleType("sounddevice")
     sd.default = types.SimpleNamespace(device=(0, 1))
-    sd.query_devices = lambda *a, **k: [
-        {"name": "Fake Mic", "max_input_channels": 1, "default_samplerate": 16000.0}
-    ]
+    # Как настоящий sounddevice: без device — список, с device — словарь.
+    def query_devices(device=None, kind=None):
+        info = {
+            "name": "Fake Mic",
+            "max_input_channels": 1,
+            "default_samplerate": 16000.0,
+        }
+        # Как в sounddevice: без аргументов — список, с device/kind — словарь.
+        return [info] if device is None and kind is None else info
+
+    sd.query_devices = query_devices
     sd.check_input_settings = lambda **k: None
     sd.InputStream = lambda **options: FakeStream([speech], **options)
     monkeypatch.setitem(sys.modules, "sounddevice", sd)

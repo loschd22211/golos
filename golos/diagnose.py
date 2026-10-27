@@ -22,11 +22,14 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import logging
 import os
 import sys
 import time
 import traceback
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 OK = "[ OK ]"
 BAD = "[БЕДА]"
@@ -254,7 +257,15 @@ def check_target_window() -> None:
         tracker.remember_current()
         print(f"     сейчас активно: {elevate.describe_window()}")
         target = tracker.resolve_target()
-        if target:
+        if target and _looks_like_overlay(target):
+            print(f"     цель вставки:   {elevate.describe_window(target)}")
+            say(
+                WARN,
+                "цель вставки — сама плашка «Голос», а не поле ввода",
+                "щёлкните в браузере/редакторе и запустите диагностику снова "
+                "(текст в плашку не печатается)",
+            )
+        elif target:
             print(f"     цель вставки:   {elevate.describe_window(target)}")
             say(OK, "окно-получатель определено", "текст пойдёт туда")
         else:
@@ -268,6 +279,20 @@ def check_target_window() -> None:
             print("      трекер цели всё равно печатает в последнее чужое окно)")
     except Exception as exc:
         say(WARN, "проверка окна не удалась", str(exc))
+
+
+def _looks_like_overlay(hwnd) -> bool:
+    """Окно принадлежит «Голосу» (может быть запущен другой экземпляр)."""
+    try:
+        from golos import winfocus
+
+        title = (winfocus.window_title(hwnd) or "").strip().lower()
+        exe = (winfocus.process_exe(winfocus.window_pid(hwnd)) or "").lower()
+        if "голос" in title or "golos" in title:
+            return True
+        return exe.endswith(("pythonw.exe", "python.exe")) and not title
+    except Exception:  # pragma: no cover - только Windows
+        return False
 
 
 def check_performance(config, cuda_ok: bool) -> None:
@@ -480,7 +505,58 @@ def check_clipboard() -> None:
         say(BAD, "буфер обмена недоступен", str(exc))
 
 
-def check_recording(config, seconds: float):
+def save_wav(path: Path, samples, sample_rate: int = 16000) -> Path | None:
+    """Сохранить запись в WAV — чтобы её можно было послушать своими ушами."""
+    try:
+        import wave
+
+        import numpy as np
+
+        audio = np.asarray(samples, dtype=np.float32).reshape(-1)
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        if peak > 1.0:  # на всякий случай не режем в клиппинг при сохранении
+            audio = audio / peak
+        data = np.clip(audio, -1.0, 1.0)
+        pcm = (data * 32767.0).astype("<i2").tobytes()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(int(sample_rate))
+            handle.writeframes(pcm)
+        return path
+    except Exception as exc:  # pragma: no cover - диск/формат
+        log.warning("Не удалось сохранить запись: %s", exc)
+        return None
+
+
+def audio_report(samples, sample_rate: int = 16000) -> dict:
+    """Что за звук записан: речь, тишина или ровный шум/музыка."""
+    from golos.streaming import _speech_stats
+
+    try:
+        import numpy as np
+
+        audio = np.asarray(samples, dtype=np.float32).reshape(-1)
+        if not audio.size:
+            return {"rms": 0.0, "peak": 0.0, "clipped": 0.0, "speech": False}
+        peak = float(np.max(np.abs(audio)))
+        rms = float(np.sqrt((audio * audio).mean()))
+        clipped = float((np.abs(audio) > 0.99).mean())
+        stats = _speech_stats(audio)
+        return {
+            "rms": round(rms, 4),
+            "peak": round(peak, 3),
+            "clipped": round(clipped, 3),
+            # речь — не ровная огибающая и звук не на уровне шума
+            "speech": (not stats["steady"]) and rms > 0.004,
+            "cv": stats.get("cv"),
+        }
+    except Exception:  # pragma: no cover
+        return {"rms": 0.0, "peak": 0.0, "clipped": 0.0, "speech": False}
+
+
+def check_recording(config, seconds: float, device: str = "", appdata: Path | None = None):
     section(f"Запись {seconds:g} секунд — ГОВОРИТЕ СЕЙЧАС")
     print("     Прочитайте вслух (чтобы проверить распознавание по образцу):")
     print(f"       «{TEST_PHRASE}»")
@@ -492,6 +568,11 @@ def check_recording(config, seconds: float):
         say(BAD, "модуль записи не загрузился")
         return None
 
+    if device:
+        # Проверить другой микрофон, не меняя настройки приложения.
+        config = config.copy()
+        config.input_device = str(device)
+        print(f"     микрофон для проверки: {device}")
     recorder = MicrophoneRecorder(config)
     try:
         recorder.start()
@@ -537,6 +618,33 @@ def check_recording(config, seconds: float):
             "Параметры → Конфиденциальность → Микрофон → разрешить приложениям")
         return recording
     say(OK, "звук с микрофона есть")
+
+    report = audio_report(recording.samples, recording.sample_rate)
+    print(
+        f"     RMS: {report['rms']}, пик: {report['peak']}, "
+        f"перегрузка: {report['clipped'] * 100:.1f}% кадров"
+    )
+    if report.get("clipped", 0) > 0.01:
+        say(
+            WARN,
+            "звук перегружен (клиппинг)",
+            "убавьте уровень микрофона в Windows: Звук → Устройство записи → "
+            "Свойства → Уровни; перегрузка превращает речь в шум",
+        )
+    if not report["speech"]:
+        say(
+            WARN,
+            "в записи не слышно речи — ровный шум, музыка или тишина",
+            "скорее всего выбран не тот микрофон: проверьте устройство записи "
+            "и его уровень",
+        )
+
+    if appdata is not None:
+        path = save_wav(appdata / "test-audio.wav", recording.samples, recording.sample_rate)
+        if path is not None:
+            print(f"     запись сохранена: {path}")
+            print("     послушайте этот файл: если там не ваша речь — микрофон не тот,")
+            print("     и никакая модель тут не поможет.")
     return recording
 
 
@@ -664,10 +772,27 @@ def check_streaming_logic(config, appdata: Path, recording, transcriber=None) ->
                       f"{segment['text']!r} (без таймингов слов)")
 
         if not segments:
-            quiet = recording.peak < 0.01
-            say(WARN if quiet else BAD,
-                "модель не вернула сегментов на куске речи",
-                "в записи тишина — потоковый режим не проверить" if quiet else "")
+            report = audio_report(recording.samples, recording.sample_rate)
+            if not report["speech"]:
+                # Не провал потока, а проблема записи: шум или не тот микрофон.
+                say(
+                    WARN,
+                    "в записи не слышно речи — поток проверять не на чем",
+                    "послушайте %APPDATA%\\Golos\\test-audio.wav: если там не "
+                    "ваша речь, выбран не тот микрофон",
+                )
+            elif recording.peak < 0.01:
+                say(
+                    WARN,
+                    "модель не вернула сегментов на куске речи",
+                    "в записи тишина — потоковый режим не проверить",
+                )
+            else:
+                say(
+                    BAD,
+                    "модель не вернула сегментов на куске речи",
+                    "речь в записи есть — пришлите test-audio.wav и этот вывод",
+                )
         elif ready:
             say(OK, "текст будет вставляться по ходу речи", f"готово слов: {ready}")
         else:
@@ -834,6 +959,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--record", type=float, default=5.0, help="сколько секунд писать микрофон")
     parser.add_argument("--fix", action="store_true", help="записать рабочие настройки в config.json")
     parser.add_argument("--no-record", action="store_true", help="не записывать микрофон")
+    parser.add_argument(
+        "--device",
+        default="",
+        help="индекс или имя другого микрофона для проверки (например, --device 8)",
+    )
     args = parser.parse_args(argv)
 
     _utf8_stdout()
@@ -861,7 +991,9 @@ def main(argv: list[str] | None = None) -> int:
 
     recording = None
     if not args.no_record:
-        recording = check_recording(config, max(2.0, args.record))
+        recording = check_recording(
+            config, max(2.0, args.record), device=args.device, appdata=appdata
+        )
     transcriber = check_model(config, appdata, recording)
     check_streaming_logic(config, appdata, recording, transcriber)
     check_noise_filters()

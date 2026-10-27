@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 from dataclasses import dataclass
 
@@ -109,7 +110,8 @@ class MicrophoneRecorder:
         self._chunks: list = []
         self._lock = threading.Lock()
         self._recording = False
-        self._device_rate = int(config.sample_rate)
+        self._device_rate = int(config.sample_rate)   # частота микрофона
+        self._capture_rate = int(config.sample_rate)  # частота, в которой храним
         self._peak = 0.0
 
     # ------------------------------------------------------------------ state
@@ -141,20 +143,17 @@ class MicrophoneRecorder:
             device = resolve_device(self.config.input_device)
             rate = self._pick_samplerate(sd, device)
             self._device_rate = rate
+            # Микрофон пишет в своей частоте, а храним уже приведённое к 16 кГц:
+            # иначе каждый snapshot() пересчитывал бы весь буфер заново.
+            self._capture_rate = int(self.config.sample_rate or 16000)
             self._chunks = []
             self._peak = 0.0
             self._np = np
 
+            extra = _wasapi_settings(sd)
             try:
                 # Создание потока колбэки не вызывает — можно делать это под замком.
-                stream = sd.InputStream(
-                    device=device,
-                    channels=1,
-                    samplerate=rate,
-                    dtype="float32",
-                    blocksize=0,
-                    callback=self._callback,
-                )
+                stream = _open_stream(sd, device, rate, extra, self._callback)
             except Exception as exc:
                 raise _open_error(exc) from exc
 
@@ -184,7 +183,7 @@ class MicrophoneRecorder:
                 return None
             self._recording = False
             stream, self._stream = self._stream, None
-            chunks, rate = self._chunks, self._device_rate
+            chunks, rate = self._chunks, self._capture_rate
             self._chunks = []
 
         if stream is not None:
@@ -229,7 +228,7 @@ class MicrophoneRecorder:
             return None
         with self._lock:
             chunks = list(self._chunks)
-            rate = self._device_rate
+            rate = self._capture_rate
         if not chunks:
             return None
         audio = np.concatenate(chunks, axis=0).reshape(-1).astype(np.float32, copy=False)
@@ -263,31 +262,66 @@ class MicrophoneRecorder:
             chunk = indata.copy()
         except Exception:
             return
-        with self._lock:
-            if self._recording:
-                self._chunks.append(chunk)
         try:
-            self._peak = float(self._np.max(self._np.abs(chunk))) if chunk.size else 0.0
+            self._peak = (
+                float(self._np.max(self._np.abs(chunk))) if chunk.size else 0.0
+            )
         except Exception:
             pass
 
+        chunk = self._to_capture_rate(chunk)
+        with self._lock:
+            if self._recording:
+                self._chunks.append(chunk)
+
+    def _to_capture_rate(self, chunk):
+        """Привести блок к частоте хранения (16 кГц), не копя лишнюю память."""
+        np = self._np
+        audio = np.asarray(chunk, dtype=np.float32).reshape(-1)
+        src, dst = self._device_rate, self._capture_rate
+        if src != dst and audio.size:
+            audio = self._resample(audio, src, dst)
+        return audio.reshape(-1, 1)
+
     def _pick_samplerate(self, sd, device):
-        """16 кГц идеальны для Whisper, но не каждый микрофон их поддерживает."""
+        """Писать в «родной» частоте микрофона, а к 16 кГц приводить самим.
+
+        Раньше мы просили у драйвера сразу 16 кГц. Windows (особенно через MME)
+        «соглашается» и пересэмплирует звук своим фильтром — речь становится
+        глухой, и Whisper выдаёт «Алло!» вместо фразы. Поэтому берём частоту
+        устройства (обычно 48 кГц) и ресемплируем сами — заодно это дешевле.
+        """
         wanted = int(self.config.sample_rate or 16000)
-        try:
-            sd.check_input_settings(
-                device=device, channels=1, samplerate=wanted, dtype="float32"
-            )
-            return wanted
-        except Exception:
-            pass
+        native = None
         try:
             info = sd.query_devices(device, "input")
-            default_rate = int(info.get("default_samplerate") or 48000)
+            rate = int(round(float(info.get("default_samplerate") or 0)))
+            native = rate if rate >= 8000 else None
         except Exception:
-            default_rate = 48000
-        log.info("Микрофон не поддерживает %s Гц, использую %s Гц", wanted, default_rate)
-        return default_rate
+            native = None
+
+        order: list[int] = []
+        for rate in (native, 48000, 44100, wanted):
+            if rate and rate not in order:
+                order.append(rate)
+
+        for rate in order:
+            try:
+                sd.check_input_settings(
+                    device=device, channels=1, samplerate=rate, dtype="float32"
+                )
+                if rate != wanted:
+                    log.info(
+                        "Запись в родной частоте микрофона %s Гц (для модели — %s Гц)",
+                        rate,
+                        wanted,
+                    )
+                return rate
+            except Exception:
+                continue
+        fallback = native or max(wanted, 48000)
+        log.warning("Микрофон не подтвердил частоты, пробую %s Гц", fallback)
+        return fallback
 
     def _resample(self, audio, src_rate: int, dst_rate: int):  # pragma: no cover
         np = self._np
@@ -299,6 +333,39 @@ class MicrophoneRecorder:
             return audio[:0]
         src_index = np.linspace(0.0, audio.size - 1, num=target_size, dtype=np.float64)
         return np.interp(src_index, np.arange(audio.size), audio).astype(np.float32)
+
+
+def _wasapi_settings(sd):
+    """WASAPI вместо MME: на Windows звук заметно чище и без лишних задержек.
+
+    ``auto_convert`` разрешает драйверу подстроить частоту, если наша не
+    поддерживается напрямую. Если WASAPI недоступен (или падает), просто
+    открываем поток как раньше.
+    """
+    try:
+        if sys.platform != "win32":
+            return None
+        settings = getattr(sd, "WasapiSettings", None)
+        return settings(auto_convert=True) if settings else None
+    except Exception:  # pragma: no cover - экзотические сборки PortAudio
+        return None
+
+
+def _open_stream(sd, device, rate: int, extra, callback):
+    options = {
+        "device": device,
+        "channels": 1,
+        "samplerate": rate,
+        "dtype": "float32",
+        "blocksize": 0,
+        "callback": callback,
+    }
+    if extra is not None:
+        try:
+            return sd.InputStream(extra_settings=extra, **options)
+        except Exception as exc:
+            log.debug("WASAPI не подошёл (%s) — открываю поток без него", exc)
+    return sd.InputStream(**options)
 
 
 def _gain_of(before, after) -> float:
