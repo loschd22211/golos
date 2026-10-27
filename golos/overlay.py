@@ -56,8 +56,12 @@ BUTTON_TITLES = {
     "stop": "Остановить запись (микрофон выключится)",
 }
 
-BG = "#141922"
+BG = "#141922"          # цвет панели (для текста и запасного пути)
 SURFACE = "#1c2333"
+# Фон окна: этот цвет Windows показывает полностью прозрачным, поэтому видны
+# только скруглённая панель и то, что на ней нарисовано. Акрил для этого не
+# годится: он закрашивает весь прямоугольник окна (отсюда был «серый квадрат»).
+KEY = glass.TRANSPARENT_KEY
 BORDER = "#2b3342"
 TEXT = "#e9eef8"
 MUTED = "#8b96ab"
@@ -87,18 +91,19 @@ STATE_HINTS = {
 }
 
 MODEL_LABELS = {
+    "auto": "auto — подобрать под компьютер",
     "tiny": "tiny — очень быстро",
     "base": "base — быстро",
     "small": "small — быстро и точно",
-    "medium": "medium — точнее, медленнее",
+    "medium": "medium — точнее (нужна видеокарта)",
     "large-v3": "large-v3 — максимум (нужен GPU)",
 }
 LANGS = {"ru": "Русский", "auto": "Авто (рус + eng)", "en": "English"}
 GLASS_LEVELS = {
     "Непрозрачная": 1.0,
-    "Стекло 93%": 0.93,
-    "Легче 80%": 0.8,
-    "Совсем лёгкая 65%": 0.65,
+    "Стекло 94%": 0.94,
+    "Легче 85%": 0.85,
+    "Лёгкая 75%": 0.75,
 }
 METHODS = {"paste": "Буфер + Ctrl+V", "type": "Посимвольно"}
 
@@ -161,14 +166,18 @@ class Overlay:
         root = self.root
         root.title(APP_TITLE)
         root.overrideredirect(True)
-        root.configure(bg=BG)
+        # Фон холста — цвет-ключ. Если система не умеет прозрачность, ниже
+        # подставим обычный тёмный фон, чтобы не было «светлой рамки».
+        self._key = KEY
+        self._transparent = False
+        root.configure(bg=KEY)
         try:
             root.attributes("-topmost", True)
         except tk.TclError:  # pragma: no cover
             pass
 
         self.canvas = tk.Canvas(
-            root, width=WIDTH, height=HEIGHT, bg=BG, highlightthickness=0, cursor="hand2"
+            root, width=WIDTH, height=HEIGHT, bg=KEY, highlightthickness=0, cursor="hand2"
         )
         self.canvas.pack()
 
@@ -193,59 +202,38 @@ class Overlay:
         self.apply_look()
 
     # -------------------------------------------------------------------- вид
-    def apply_look(self, retries: int = 2) -> None:
-        """Применить «стекло»: прозрачность, скруглённые углы, размытие фона.
-
-        ``retries`` — сколько раз повторить, если окно ещё не показано: до
-        первого ``deiconify`` у него может не быть размера, и скруглить его
-        нечем. Раньше из-за этого оставался «серый квадрат» вокруг плашки.
-        """
+    def apply_look(self) -> None:
+        """Применить «стекло»: прозрачный фон окна и общую прозрачность."""
         cfg = self.app.config
         try:
             opacity = float(getattr(cfg, "overlay_opacity", 0.94) or 0.94)
         except (TypeError, ValueError):  # pragma: no cover
             opacity = 0.94
-        blur = bool(getattr(cfg, "overlay_glass", False))
 
-        report = {}
         try:
-            report = glass.apply_glass(
-                self.root, radius=PANEL_RADIUS, opacity=opacity, blur=blur
-            )
+            report = glass.apply_glass(self.root, opacity=opacity, key=KEY)
         except Exception as exc:  # pragma: no cover - экзотическая система
             log.debug("Стекло недоступно: %s", exc)
+            report = {"transparent": False, "opacity": False}
 
-        if report:
-            log.info(
-                "Вид плашки: скругление=%s (регион=%s), размытие=%s, "
-                "прозрачность=%.2f",
-                report.get("rounded"),
-                report.get("region"),
-                report.get("blur"),
-                opacity,
-            )
-
-        if report and not report.get("rounded"):
-            # Скругление не вышло: показываем скруглённую панель «по цвету»
-            # прозрачности — так углы не превращаются в серые квадраты.
-            self._use_color_key(True)
-            if retries > 0:
+        self._transparent = bool(report.get("transparent"))
+        if not self._transparent:
+            # Система не умеет прозрачный фон — красим окно в цвет панели,
+            # чтобы вокруг плашки не было светлой каймы.
+            self._key = BG
+            for widget in (self.root, self.canvas):
                 try:
-                    self.root.after(140, lambda: self.apply_look(retries - 1))
+                    widget.configure(bg=BG)
                 except tk.TclError:  # pragma: no cover
                     pass
-        else:
-            self._use_color_key(False)
 
+        log.info(
+            "Вид плашки: прозрачный фон=%s, прозрачность=%.2f",
+            self._transparent,
+            opacity,
+        )
         self._build_panel()
         self._draw()
-
-    def _use_color_key(self, enabled: bool) -> None:
-        """Запасной путь: сделать фон плашки прозрачным по цвету (Windows)."""
-        try:
-            self.root.attributes("-transparentcolor", BG if enabled else "")
-        except tk.TclError:  # pragma: no cover - не Windows
-            pass
 
     def _build_panel(self) -> None:
         """Собрать картинку панели (градиент, блик, рамка) один раз."""
@@ -280,7 +268,7 @@ class Overlay:
         if self._panel_photo is not None:
             # Панель «матовое стекло»: градиент, блик и светлая рамка.
             c.create_image(0, 0, anchor="nw", image=self._panel_photo)
-        else:  # pragma: no cover - без Pillow
+        else:  # pragma: no cover - без Pillow: обычная панель
             c.create_rectangle(0, 0, WIDTH, HEIGHT, fill=BG, outline="")
         c.create_rectangle(PANEL_RADIUS, 0, WIDTH - PANEL_RADIUS, 2, fill=color, outline="")
 
@@ -554,7 +542,7 @@ class SettingsDialog:
         self.win = tk.Toplevel(parent)
         self.win.title(f"{APP_TITLE} — настройки")
         self.win.configure(bg=BG)
-        self.win.geometry("460x470")
+        self.win.geometry("460x440")
         self.win.resizable(False, False)
         try:
             winfocus.clear_no_activate(self.win)
@@ -569,7 +557,6 @@ class SettingsDialog:
         self.autostart = tk.BooleanVar(value=cfg.autostart)
         self.admin_rights = tk.BooleanVar(value=getattr(cfg, "run_as_admin", True))
         self.sound = tk.BooleanVar(value=cfg.sound_feedback)
-        self.glass = tk.BooleanVar(value=bool(getattr(cfg, "overlay_glass", False)))
         opacity = float(getattr(cfg, "overlay_opacity", 0.94) or 0.94)
         self.opacity = tk.StringVar(
             value=min(GLASS_LEVELS, key=lambda name: abs(GLASS_LEVELS[name] - opacity))
@@ -625,19 +612,6 @@ class SettingsDialog:
         opacity.grid(row=6, column=1, sticky="ew", **pad)
         opacity.bind("<<ComboboxSelected>>", lambda _e: self.apply())
 
-        tk.Checkbutton(
-            form,
-            text="Размытие фона (эффект стекла, Windows 10/11)",
-            variable=self.glass,
-            bg=BG,
-            fg=TEXT,
-            selectcolor="#1c2333",
-            activebackground=BG,
-            activeforeground=TEXT,
-            font=_font(9),
-            command=self.apply,
-        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=14, pady=4)
-
         # Без прав администратора Windows не пускает текст в админские окна.
         tk.Checkbutton(
             form,
@@ -650,7 +624,7 @@ class SettingsDialog:
             activeforeground=TEXT,
             font=_font(9),
             command=self.apply,
-        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=14, pady=4)
+        ).grid(row=7, column=0, columnspan=2, sticky="w", padx=14, pady=4)
 
         buttons = tk.Frame(self.win, bg=BG)
         buttons.pack(fill="x", padx=14, pady=12)
@@ -676,7 +650,6 @@ class SettingsDialog:
         cfg.autostart = bool(self.autostart.get())
         cfg.sound_feedback = bool(self.sound.get())
         cfg.run_as_admin = bool(self.admin_rights.get())
-        cfg.overlay_glass = bool(self.glass.get())
         cfg.overlay_opacity = GLASS_LEVELS.get(self.opacity.get(), cfg.overlay_opacity)
         cfg.normalize()
         return cfg

@@ -41,7 +41,8 @@ class WhisperTranscriber:
         self.config = config
         self.models_dir = Path(models_dir) if models_dir else None
         self._model = None
-        self._model_key: tuple | None = None
+        self._model_key: tuple | None = None   # что просили загрузить
+        self.active_model = ""       # какая модель реально загружена
         self.active_device = ""      # на чём реально работаем: cpu / cuda
         self.active_compute = ""
         self.fallback_reason = ""    # почему не взлетела видеокарта
@@ -79,7 +80,9 @@ class WhisperTranscriber:
         """Есть ли модель локально (чтобы предупредить о скачивании)."""
         if not self.models_dir or not self.models_dir.exists():
             return False
-        target = (model or self.config.model).lower()
+        # «auto» = medium на GPU или small на CPU: годится любая из скачанных.
+        wanted = model or self.config.model
+        target = "small" if wanted == "auto" else resolve_model(wanted, "cpu").lower()
         try:
             return any(
                 target in entry.name.lower() for entry in self.models_dir.iterdir()
@@ -96,12 +99,16 @@ class WhisperTranscriber:
         with self._lock:
             self._model = None
             self._model_key = None
+            self.active_model = ""
 
     def _ensure_model(self):
         cfg = self.config
         device = resolve_device(cfg.device)
         compute_type = resolve_compute_type(device, cfg.compute_type)
-        key = (cfg.model, device, compute_type)
+        # Ключ — то, что просили. После удачной загрузки он же и сохраняется,
+        # даже если пришлось откатиться на другую модель/устройство: иначе
+        # неудачный кандидат заставлял бы перезагружать модель на каждом куске.
+        key = (resolve_model(cfg.model, device), device, compute_type)
 
         with self._lock:
             if self._model is not None and self._model_key == key:
@@ -112,10 +119,6 @@ class WhisperTranscriber:
                 if self._model is not None and self._model_key == key:
                     return self._model
 
-            if device == "cuda":
-                # Windows: cuBLAS/cuDNN из pip-пакетов, иначе CUDA не поднимется.
-                enable_dlls()
-
             try:
                 from faster_whisper import WhisperModel
             except Exception as exc:  # pragma: no cover
@@ -125,54 +128,54 @@ class WhisperTranscriber:
                     f"Детали: {exc}"
                 ) from exc
 
-            kwargs = {
-                "device": device,
-                "compute_type": compute_type,
-                "cpu_threads": max(1, (os.cpu_count() or 4) - 1),
-                "num_workers": 1,
-            }
-            if self.models_dir:
-                self.models_dir.mkdir(parents=True, exist_ok=True)
-                kwargs["download_root"] = str(self.models_dir)
+            candidates = load_candidates(cfg.model, device, compute_type)
+            if len(candidates) > 1:
+                log.info(
+                    "План загрузки: %s",
+                    ", ".join(f"{m}/{d}/{c}" for m, d, c in candidates),
+                )
 
-            log.info(
-                "Загрузка модели %s (device=%s, compute_type=%s)",
-                cfg.model,
-                device,
-                compute_type,
-            )
-            try:
-                model = WhisperModel(cfg.model, **kwargs)
-            except Exception as exc:
-                # Видеокарта/тип вычислений могут не подойти — откатываемся на CPU int8.
-                if device != "cpu" or compute_type != "int8":
-                    log.warning("Не удалось загрузить модель (%s), пробую CPU/int8", exc)
-                    try:
-                        model = WhisperModel(
-                            cfg.model,
-                            device="cpu",
-                            compute_type="int8",
-                            cpu_threads=kwargs["cpu_threads"],
-                            num_workers=1,
-                            **({"download_root": kwargs["download_root"]} if "download_root" in kwargs else {}),
-                        )
-                        device, compute_type = "cpu", "int8"
+            cpu_threads = max(1, (os.cpu_count() or 4) - 1)
+            model = None
+            last_error: Exception | None = None
+            for name, dev, compute in candidates:
+                kwargs = {
+                    "device": dev,
+                    "compute_type": compute,
+                    "cpu_threads": cpu_threads,
+                    "num_workers": 1,
+                }
+                if self.models_dir:
+                    self.models_dir.mkdir(parents=True, exist_ok=True)
+                    kwargs["download_root"] = str(self.models_dir)
+                try:
+                    # Windows: cuBLAS/cuDNN из pip-пакетов, иначе CUDA не поднимется.
+                    if dev == "cuda":
+                        enable_dlls()
+                    log.info("Загрузка модели %s (device=%s, compute_type=%s)", name, dev, compute)
+                    model = WhisperModel(name, **kwargs)
+                except Exception as exc:
+                    last_error = exc
+                    log.warning("Модель %s/%s/%s не загрузилась: %s", name, dev, compute, exc)
+                    if dev == "cuda":
                         self.fallback_reason = _cuda_hint(exc)
-                        log.warning(
-                            "Видеокарта недоступна, работаю на CPU/int8. %s",
-                            self.fallback_reason,
-                        )
-                    except Exception as exc2:
-                        raise _load_error(cfg.model, exc2) from exc2
-                else:
-                    raise _load_error(cfg.model, exc) from exc
+                    continue
+                self.active_model = name
+                device, compute_type = dev, compute
+                break
+
+            if model is None:
+                raise _load_error(resolve_model(cfg.model, device), last_error or Exception("—"))
 
             with self._lock:
                 self._model = model
-                self._model_key = (cfg.model, device, compute_type)
+                self._model_key = key
+                self.active_model = self.active_model or candidates[0][0]
                 self.active_device = device
                 self.active_compute = compute_type
-            log.info("Модель готова: %s/%s", device, compute_type)
+            log.info(
+                "Модель готова: %s (%s/%s)", self.active_model, device, compute_type
+            )
             return model
 
     def segments(
@@ -209,6 +212,10 @@ class WhisperTranscriber:
             "compression_ratio_threshold": 2.4,
             "temperature": 0.0,
             "condition_on_previous_text": False,
+            # Пауза в середине куска, где модель «додумывает» фразу, — самый
+            # частый источник выдумок. Работает только вместе с таймингами
+            # слов, поэтому включено именно здесь.
+            "hallucination_silence_threshold": 2.0,
             "without_timestamps": False,
             # Тайминги по словам нужны, чтобы вставлять текст ровно по границе
             # слова, а не резать его посреди «приве…».
@@ -344,6 +351,39 @@ def resolve_device(preferred: str) -> str:
     except Exception:
         pass
     return "cpu"
+
+
+def resolve_model(preferred: str, device: str) -> str:
+    """Какую модель реально брать.
+
+    ``auto`` — самый разумный выбор «из коробки»: на видеокарте ``medium``
+    (русский он знает заметно лучше, а GPU его тянет), на процессоре ``small``
+    (иначе ожидание текста станет невыносимым).
+    """
+    name = (preferred or "auto").strip().lower()
+    if name == "auto":
+        return "medium" if device == "cuda" else "small"
+    return name
+
+
+def load_candidates(preferred: str, device: str, compute_type: str) -> list[tuple[str, str, str]]:
+    """Порядок попыток загрузки: от лучшего качества к самому совместимому."""
+    model = resolve_model(preferred, device)
+    attempts: list[tuple[str, str, str]] = [(model, device, compute_type)]
+    if device == "cuda":
+        if compute_type != "int8_float16":
+            attempts.append((model, "cuda", "int8_float16"))
+        if model not in ("small", "base", "tiny"):
+            # Не хватило видеопамяти на medium — берём small, но всё ещё на GPU.
+            attempts.append(("small", "cuda", compute_type))
+    attempts.append(("small", "cpu", "int8"))
+    seen: set[tuple[str, str, str]] = set()
+    unique: list[tuple[str, str, str]] = []
+    for item in attempts:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
 
 
 def resolve_compute_type(device: str, preferred: str) -> str:

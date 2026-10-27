@@ -13,7 +13,7 @@ from typing import Any
 from . import APP_NAME
 
 # Модели Whisper (чем больше — тем точнее и медленнее).
-MODELS = ("tiny", "base", "small", "medium", "large-v3")
+MODELS = ("auto", "tiny", "base", "small", "medium", "large-v3")
 MODEL_LABELS = {
     "tiny": "tiny — очень быстро, низкая точность",
     "base": "base — быстро, слабая точность",
@@ -33,7 +33,7 @@ INSERT_METHODS = {
     "type": "Печать посимвольно (буква за буквой)",
 }
 
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 DEVICES = ("auto", "cpu", "cuda")
 COMPUTE_TYPES = ("auto", "int8", "int8_float16", "float16", "float32")
@@ -108,9 +108,14 @@ class Config:
     # Ниже этой громкости (среднеквадратичной) кусок считается тишиной и в
     # модель не уходит: экономит процессор и убирает «фантомные» фразы.
     silence_threshold: float = 0.004
+    # Подтягивать тихую речь до нормальной громкости перед распознаванием:
+    # с тихим микрофоном (пик 0.02-0.05) модель почти ничего не слышит.
+    normalize_audio: bool = True
 
     # --- распознавание ---
-    model: str = "small"
+    # "auto": на видеокарте — medium (точнее), на процессоре — small (быстрее).
+    # Конкретное имя фиксирует модель навсегда.
+    model: str = "auto"
     device: str = "auto"
     compute_type: str = "auto"
     # Русский по умолчанию. С «auto» на коротких кусках Whisper постоянно
@@ -140,12 +145,8 @@ class Config:
     remove_fillers: bool = False
 
     # --- интерфейс / прочее ---
-    # Плашка — «стекло»: полупрозрачная, со скруглёнными углами. Размытие фона
-    # работает на Windows 10/11 (акрил); прозрачность регулируется 0.35–1.0.
-    # Размытие фона (акрил). По умолчанию выключено: акрил красит ВЕСЬ
-    # прямоугольник окна, и если система не дала скруглить углы, вокруг
-    # плашки появляется серый квадрат. Включается галочкой в настройках.
-    overlay_glass: bool = False
+    # Прозрачность плашки. Фон окна делается прозрачным по ключевому цвету,
+    # поэтому углы скруглённые и «квадрата» вокруг нет.
     overlay_opacity: float = 0.94
     # Держать окно-получатель закреплённым на время диктовки: переключение
     # вкладок не уводит текст. Выключите, если мешает возврат фокуса.
@@ -171,7 +172,7 @@ class Config:
     # ------------------------------------------------------------------ utils
     def normalize(self) -> None:
         """Привести значения к допустимым (после ручной правки JSON)."""
-        self.model = _pick(self.model, MODELS, "small")
+        self.model = _pick(self.model, MODELS, "auto")
         self.device = _pick(self.device, DEVICES, "auto")
         self.compute_type = _pick(self.compute_type, COMPUTE_TYPES, "auto")
         self.language = _pick(self.language, tuple(LANGUAGES), "ru")
@@ -189,11 +190,11 @@ class Config:
         self.hold_back_seconds = _clamp_float(self.hold_back_seconds, 0.0, 2.0, 0.3)
         self.force_commit_seconds = _clamp_float(self.force_commit_seconds, 1.0, 15.0, 2.5)
         self.silence_threshold = _clamp_float(self.silence_threshold, 0.0, 0.2, 0.004)
+        self.normalize_audio = _as_bool(self.normalize_audio, True)
         self.sample_rate = _clamp_int(self.sample_rate, 8000, 48000, 16000)
         self.min_duration = _clamp_float(self.min_duration, 0.1, 10.0, 0.35)
         self.paste_delay = _clamp_float(self.paste_delay, 0.0, 2.0, 0.15)
-        self.overlay_opacity = _clamp_float(self.overlay_opacity, 0.35, 1.0, 0.94)
-        self.overlay_glass = _as_bool(self.overlay_glass, False)
+        self.overlay_opacity = _clamp_float(self.overlay_opacity, 0.55, 1.0, 0.94)
         self.pin_target = _as_bool(self.pin_target, True)
         self.run_as_admin = _as_bool(self.run_as_admin, True)
         self.replacements = _clean_replacements(self.replacements)
@@ -234,9 +235,7 @@ def load_config(path: Path | None = None) -> tuple[Config, Path | None]:
         except (TypeError, ValueError):
             saved_version = 1
         if saved_version < 3:
-            # 1.4.0 включал акрил по умолчанию, а без скругления окна он красил
-            # весь прямоугольник — получался «серый квадрат» вокруг плашки.
-            config.overlay_glass = False
+            # 1.4.0 включал акрил по умолчанию — он и давал «серый квадрат».
             if abs(float(getattr(config, "overlay_opacity", 0.0)) - 0.93) < 1e-6:
                 config.overlay_opacity = 0.94
         if raw.get("language") == "auto" and saved_version < 2:

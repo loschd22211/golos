@@ -415,7 +415,8 @@ class DictationApp:
                 self.ui.on_notify(
                     "Голос",
                     f"Скачиваю модель «{self.config.model}» — это займёт несколько минут "
-                    "(интернет нужен только сейчас)",
+                    "(интернет нужен только сейчас). Прогресс — в журнале и в консоли "
+                    "при запуске с run.bat --debug.",
                 )
             started = time.monotonic()
             self.transcriber.preload()

@@ -326,9 +326,9 @@ def test_panel_is_drawn_as_image(ui):
 
 def test_opacity_from_config_is_used(ui):
     cfg = Config()
-    cfg.overlay_opacity = 0.65
+    cfg.overlay_opacity = 0.75
     overlay, app, root = make_overlay(ui, cfg)
-    assert root.options["attr:-alpha"] == pytest.approx(0.65)
+    assert root.options["attr:-alpha"] == pytest.approx(0.75)
 
 
 def test_apply_look_updates_opacity_without_restart(ui):
@@ -338,18 +338,24 @@ def test_apply_look_updates_opacity_without_restart(ui):
     assert root.options["attr:-alpha"] == pytest.approx(0.8)
 
 
-def test_settings_dialog_has_opacity_and_glass(ui):
+def test_without_transparency_system_colours_window(ui, monkeypatch):
+    """Если система не умеет прозрачный фон — окно красится в цвет панели."""
+    module = ui["module"]
+    monkeypatch.setattr(module.glass, "use_transparent_key", lambda *a, **k: False)
+    overlay, app, root = make_overlay(ui)
+    assert root.options["bg"] == module.BG
+    assert overlay.canvas.options["bg"] == module.BG
+
+
+def test_settings_dialog_has_opacity(ui):
     overlay, app, root = make_overlay(ui)
     dialog = ui["module"].SettingsDialog(root, app, overlay)
     assert dialog.opacity.get() in ui["module"].GLASS_LEVELS
-    assert hasattr(dialog, "glass")
 
-    dialog.opacity.set("Совсем лёгкая 65%")
-    dialog.glass.set(False)
+    dialog.opacity.set("Лёгкая 75%")
     dialog.apply()
 
-    assert app.config.overlay_opacity == 0.65
-    assert app.config.overlay_glass is False
+    assert app.config.overlay_opacity == 0.75
 
 
 def test_buttons_are_rounded(ui):

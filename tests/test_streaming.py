@@ -567,3 +567,56 @@ def test_looped_chunk_is_not_inserted():
 
     assert injector.inserted == []
     assert "приём" not in stream.committed_text.lower()
+
+
+def test_quiet_speech_goes_to_model_boosted():
+    """Тихая речь: фильтр тишины видит исходный уровень, а модель — усиленный."""
+    import numpy as np
+
+    class PeekTranscriber(WordTranscriber):
+        def __init__(self):
+            super().__init__()
+            self.peak = 0.0
+
+        def segments(self, audio, config=None, initial_prompt=None, beam_size=None,
+                     want_words=True):
+            self.peak = float(np.max(np.abs(audio)))
+            return []
+
+    transcriber = PeekTranscriber()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=transcriber,
+        injector=FakeInjector(),
+        config=Config(),
+    )
+    # 0.02 — тише нормы, но выше порога тишины 0.004
+    stream._process_tail(np.full(16000 * 2, 0.02, dtype=np.float32), final=False)
+    # 0.02 × 12 (предел усиления) = 0.24 — нормальный уровень речи
+    assert transcriber.peak > 0.2, "модель должна получить подтянутый звук"
+
+
+def test_normalization_respects_config():
+    import numpy as np
+
+    class PeekTranscriber(WordTranscriber):
+        def __init__(self):
+            super().__init__()
+            self.peak = 0.0
+
+        def segments(self, audio, config=None, initial_prompt=None, beam_size=None,
+                     want_words=True):
+            self.peak = float(np.max(np.abs(audio)))
+            return []
+
+    cfg = Config()
+    cfg.normalize_audio = False
+    transcriber = PeekTranscriber()
+    stream = StreamingDictator(
+        recorder=FakeRecorder(),
+        transcriber=transcriber,
+        injector=FakeInjector(),
+        config=cfg,
+    )
+    stream._process_tail(np.full(16000 * 2, 0.02, dtype=np.float32), final=False)
+    assert transcriber.peak == pytest.approx(0.02, rel=1e-3)

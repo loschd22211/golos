@@ -319,8 +319,14 @@ def test_fallback_to_cpu_when_cuda_fails(monkeypatch, tmp_path):
 
     transcriber = WhisperTranscriber(Config(device="cuda"), tmp_path)
     transcriber.preload()
-    assert attempts == ["cuda", "cpu"]
-    assert transcriber.model_key[1] == "cpu"
+    # Сначала пробуем видеокарту (несколько конфигураций), в конце — процессор.
+    assert attempts[0] == "cuda"
+    assert attempts[-1] == "cpu"
+    assert transcriber.active_device == "cpu"
+    # Ключ хранит ЗАПРОШЕННУЮ конфигурацию, иначе модель перезагружалась бы
+    # на каждом куске после отката.
+    assert transcriber.model_key[1] == "cuda"
+    assert transcriber.active_compute == "int8"
 
 
 def test_resolve_device_and_compute_type(monkeypatch):
