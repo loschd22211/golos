@@ -324,9 +324,24 @@ class MicrophoneRecorder:
         return fallback
 
     def _resample(self, audio, src_rate: int, dst_rate: int):  # pragma: no cover
+        """Привести частоту. Для кратных частот — с усреднением (антиалиасинг).
+
+        Раньше здесь была только интерполяция: при переходе 48 → 16 кГц всё
+        выше 8 кГц «заворачивалось» в слышимый диапазон и превращалось в
+        шипение поверх речи. Усреднение по factor отсчётам — простейший
+        фильтр нижних частот, которого для речи достаточно.
+        """
         np = self._np
         if src_rate == dst_rate or audio.size == 0:
             return audio
+
+        if src_rate % dst_rate == 0:
+            factor = int(src_rate // dst_rate)
+            count = audio.size // factor
+            if count > 0:
+                trimmed = audio[: count * factor].reshape(count, factor)
+                return trimmed.mean(axis=1).astype(np.float32)
+
         duration = audio.size / float(src_rate)
         target_size = int(round(duration * dst_rate))
         if target_size <= 0:

@@ -161,6 +161,29 @@ def test_recorder_widens_when_native_is_16k(monkeypatch):
     assert recorder._pick_samplerate(module, 2) == 16000
 
 
+def test_resample_by_integer_factor_averages_samples():
+    """48 → 16 кГц: усреднение по 3 отсчётам вместо интерполяции с шипением."""
+    from golos.audio import MicrophoneRecorder
+
+    recorder = MicrophoneRecorder(Config())
+    recorder._np = np
+    audio = np.array([3.0, 6.0, 9.0, 1.0, 1.0, 1.0], dtype=np.float32)
+    out = recorder._resample(audio, 48000, 16000)
+
+    assert out.size == 2
+    assert np.allclose(out, [6.0, 1.0])
+
+
+def test_resample_non_multiple_rate_keeps_duration():
+    from golos.audio import MicrophoneRecorder
+
+    recorder = MicrophoneRecorder(Config())
+    recorder._np = np
+    audio = np.zeros(44100, dtype=np.float32)
+    out = recorder._resample(audio, 44100, 16000)
+    assert abs(out.size - 16000) <= 2
+
+
 def test_recorder_resamples_when_device_rate_differs(monkeypatch):
     from golos.audio import MicrophoneRecorder
 

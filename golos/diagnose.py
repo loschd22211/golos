@@ -474,6 +474,27 @@ def phrase_similarity(reference: str, text: str) -> float:
     return difflib.SequenceMatcher(None, left, right).ratio()
 
 
+def best_partial_similarity(reference: str, text: str) -> float:
+    """Лучшее совпадение с любым куском образца.
+
+    Фразу могли прочитать не всю (или запись короче) — сравнивать целиком
+    нечестно: 0 % тогда ничего не говорит о качестве распознавания.
+    """
+    import difflib
+
+    left, right = _compare_words(reference), _compare_words(text)
+    if not left or not right:
+        return 0.0
+    best = 0.0
+    for start in range(len(left)):
+        for size in range(1, len(left) - start + 1):
+            window = left[start : start + size]
+            best = max(best, difflib.SequenceMatcher(None, window, right).ratio())
+            if best >= 0.999:
+                return 1.0
+    return best
+
+
 def check_hotkeys(config) -> None:
     section("Горячие клавиши")
     try:
@@ -556,6 +577,23 @@ def audio_report(samples, sample_rate: int = 16000) -> dict:
         return {"rms": 0.0, "peak": 0.0, "clipped": 0.0, "speech": False}
 
 
+def _mean_confidence(transcriber, recording, config) -> float | None:
+    """Средняя уверенность модели по словам: по ней видно, слышит ли она речь."""
+    try:
+        segments = transcriber.segments(recording.samples, config)
+    except Exception:  # pragma: no cover - модель уже проверена выше
+        return None
+    values = [
+        float(word["probability"])
+        for segment in segments
+        for word in (segment.get("words") or [])
+        if word.get("probability") is not None
+    ]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
 def check_recording(config, seconds: float, device: str = "", appdata: Path | None = None):
     section(f"Запись {seconds:g} секунд — ГОВОРИТЕ СЕЙЧАС")
     print("     Прочитайте вслух (чтобы проверить распознавание по образцу):")
@@ -581,23 +619,24 @@ def check_recording(config, seconds: float, device: str = "", appdata: Path | No
         return None
 
     print("     ...", end="", flush=True)
-    peak = 0.0
     started = time.time()
     while time.time() - started < seconds:
         time.sleep(0.1)
-        peak = max(peak, recorder.peak)
         print(".", end="", flush=True)
-        # Услышали голос и уже есть что распознавать — не тянем время зря.
-        if peak >= 0.03 and time.time() - started >= 3.0:
-            break
     print()
+    # Раньше мы обрывали запись через 3 секунды, как только слышали звук, —
+    # образец не успевал прочитаться целиком, и сравнение показывало 0 %.
     recording = recorder.stop()
 
     if recording is None:
         say(BAD, "микрофон не отдал звук", "проверьте разрешения Windows")
         return None
 
-    print(f"     длительность: {recording.duration:.2f} c, пик: {recording.peak:.3f}")
+    rate = getattr(recorder, "_device_rate", recording.sample_rate)
+    print(
+        f"     длительность: {recording.duration:.2f} c, пик: {recording.peak:.3f}, "
+        f"частота записи: {rate} Гц"
+    )
     # Иногда устройство открылось, но звук почти не шёл: микрофон занят другой
     # программой. Распознавать такие полсекунды бессмысленно — предупреждаем.
     if recording.duration < seconds * 0.5:
@@ -663,6 +702,23 @@ def _expected_model(config) -> str:
         return "small" if name == "auto" else name
 
 
+def play_test_audio(appdata: Path) -> None:
+    """Открыть записанный файл в проигрывателе Windows."""
+    path = Path(appdata) / "test-audio.wav"
+    if not path.exists():
+        say(WARN, "записи нет", "сначала запустите диагностику с записью")
+        return
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))  # type: ignore[attr-defined]  # noqa: S606
+        else:  # pragma: no cover - для разработки
+            print(f"     файл: {path}")
+        print(f"     открываю запись: {path}")
+        print("     если в ней не ваша речь — выбран не тот микрофон.")
+    except Exception as exc:  # pragma: no cover
+        say(WARN, "не удалось открыть запись", f"{exc}\n     файл: {path}")
+
+
 def check_model(config, appdata: Path, recording):
     """Загрузить модель и распознать запись. Возвращает транслятор для проверок."""
     section("Модель и распознавание")
@@ -705,9 +761,24 @@ def check_model(config, appdata: Path, recording):
         print(f"     распознавание: {elapsed:.1f} c, язык: {result.language or '—'}")
         print(f"     текст: {result.text!r}")
         similarity = phrase_similarity(TEST_PHRASE, result.text)
+        partial = best_partial_similarity(TEST_PHRASE, result.text)
         if result.text.strip():
-            print(f"     похожесть с образцом: {similarity * 100:.0f}%")
-            if similarity < 0.5:
+            print(
+                f"     похожесть с образцом: {similarity * 100:.0f}% "
+                f"(лучший кусок: {partial * 100:.0f}%)"
+            )
+        confidence = _mean_confidence(transcriber, recording, config)
+        if confidence is not None:
+            print(f"     уверенность модели в словах: {confidence:.2f}")
+            if confidence < 0.55:
+                say(
+                    WARN,
+                    "модель не уверена в словах",
+                    "обычно это шум, далёкий микрофон или тихая речь — "
+                    "послушайте test-audio.wav",
+                )
+        if result.text.strip():
+            if max(similarity, partial) < 0.5:
                 say(
                     WARN,
                     "текст мало похож на прочитанный образец",
@@ -956,13 +1027,18 @@ def fix_config(appdata: Path, cuda_ok: bool | None = None) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="golos.diagnose", description="Диагностика «Голоса»")
     parser.add_argument("--root", default="", help="папка проекта (по умолчанию текущая)")
-    parser.add_argument("--record", type=float, default=5.0, help="сколько секунд писать микрофон")
+    parser.add_argument("--record", type=float, default=6.0, help="сколько секунд писать микрофон")
     parser.add_argument("--fix", action="store_true", help="записать рабочие настройки в config.json")
     parser.add_argument("--no-record", action="store_true", help="не записывать микрофон")
     parser.add_argument(
         "--device",
         default="",
         help="индекс или имя другого микрофона для проверки (например, --device 8)",
+    )
+    parser.add_argument(
+        "--play-test",
+        action="store_true",
+        help="открыть сохранённую запись в проигрывателе (проверить, что слышно)",
     )
     args = parser.parse_args(argv)
 
@@ -994,6 +1070,8 @@ def main(argv: list[str] | None = None) -> int:
         recording = check_recording(
             config, max(2.0, args.record), device=args.device, appdata=appdata
         )
+        if args.play_test and recording is not None:
+            play_test_audio(appdata)
     transcriber = check_model(config, appdata, recording)
     check_streaming_logic(config, appdata, recording, transcriber)
     check_noise_filters()
